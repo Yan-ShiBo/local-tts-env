@@ -187,6 +187,89 @@ def test_encode_ogg_opus_wraps_process_errors(monkeypatch, process_error):
         encode_ogg_opus(np.zeros(1, dtype=np.float32), 24000)
 
 
+@pytest.mark.parametrize(
+    ("sample_count", "sample_rate", "expected_timeout"),
+    [
+        (2400, 24000, 30.0),
+        (200, 10, 50.0),
+    ],
+)
+def test_encode_ogg_opus_uses_duration_based_timeout(
+    monkeypatch,
+    sample_count,
+    sample_rate,
+    expected_timeout,
+):
+    run = Mock(
+        return_value=subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=b"OggS" + b"\0" * 20 + b"OpusHead",
+            stderr=b"",
+        ),
+    )
+    monkeypatch.setattr(
+        audio_encoding,
+        "ffmpeg_executable",
+        lambda: r"C:\bundled\ffmpeg.exe",
+    )
+    monkeypatch.setattr(audio_encoding.subprocess, "run", run)
+
+    encode_ogg_opus(np.zeros(sample_count, dtype=np.float32), sample_rate)
+
+    assert run.call_args.kwargs["timeout"] == expected_timeout
+
+
+def test_encode_ogg_opus_wraps_timeout_expired(monkeypatch):
+    monkeypatch.setattr(
+        audio_encoding,
+        "ffmpeg_executable",
+        lambda: r"C:\bundled\ffmpeg.exe",
+    )
+    monkeypatch.setattr(
+        audio_encoding.subprocess,
+        "run",
+        Mock(side_effect=subprocess.TimeoutExpired(["ffmpeg"], timeout=30)),
+    )
+
+    with pytest.raises(AudioEncodingError, match="^OGG encoding failed$"):
+        encode_ogg_opus(np.zeros(2400, dtype=np.float32), 24000)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    [
+        (1, b"OggS" + b"\0" * 20 + b"OpusHead"),
+        (0, b"not-an-ogg-container"),
+    ],
+)
+def test_encode_ogg_opus_rejects_failed_or_invalid_output(
+    monkeypatch,
+    returncode,
+    stdout,
+):
+    monkeypatch.setattr(
+        audio_encoding,
+        "ffmpeg_executable",
+        lambda: r"C:\bundled\ffmpeg.exe",
+    )
+    monkeypatch.setattr(
+        audio_encoding.subprocess,
+        "run",
+        Mock(
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                returncode=returncode,
+                stdout=stdout,
+                stderr=b"",
+            ),
+        ),
+    )
+
+    with pytest.raises(AudioEncodingError, match="^OGG encoding failed$"):
+        encode_ogg_opus(np.zeros(1, dtype=np.float32), 24000)
+
+
 def test_webm_encoder_streams_ebml_and_opus():
     encoder = WebMOpusEncoder(sample_rate=24000)
     try:
@@ -236,6 +319,35 @@ def test_webm_encoder_wraps_process_start_error(monkeypatch, process_error):
 def test_webm_encoder_wraps_stdin_write_error(monkeypatch, process_error):
     process = _mock_process()
     process.stdin.write.side_effect = process_error
+    _install_mock_process(monkeypatch, process)
+    encoder = WebMOpusEncoder(sample_rate=24000)
+
+    with pytest.raises(AudioEncodingError, match="^WebM encoding failed$"):
+        encoder.write(np.zeros(1, dtype=np.float32))
+
+
+def test_webm_encoder_retries_partial_stdin_writes(monkeypatch):
+    process = _mock_process()
+    process.stdin.write.side_effect = [3, 5]
+    _install_mock_process(monkeypatch, process)
+    encoder = WebMOpusEncoder(sample_rate=24000)
+
+    encoder.write(np.array([0.25, -0.5], dtype=np.float32))
+
+    assert process.stdin.write.call_count == 2
+    first, second = [
+        bytes(call.args[0])
+        for call in process.stdin.write.call_args_list
+    ]
+    expected = np.array([0.25, -0.5], dtype="<f4").tobytes()
+    assert first == expected
+    assert second == expected[3:]
+
+
+@pytest.mark.parametrize("write_result", [0, None])
+def test_webm_encoder_rejects_stalled_stdin_write(monkeypatch, write_result):
+    process = _mock_process()
+    process.stdin.write.return_value = write_result
     _install_mock_process(monkeypatch, process)
     encoder = WebMOpusEncoder(sample_rate=24000)
 
@@ -428,6 +540,7 @@ def test_webm_encoder_uses_low_latency_opus_command(monkeypatch):
         "pipe:1",
     ]
     assert popen.call_args.kwargs["bufsize"] == 0
+    assert popen.call_args.kwargs["stderr"] is subprocess.DEVNULL
     assert popen.call_args.kwargs["creationflags"] == getattr(
         subprocess,
         "CREATE_NO_WINDOW",
@@ -440,7 +553,7 @@ def test_webm_encoder_close_is_idempotent_and_kills_after_timeout(monkeypatch):
     process.stdin = Mock()
     process.stdout = Mock()
     process.stderr = Mock()
-    process.poll.return_value = None
+    process.poll.side_effect = [None, 0]
     process.wait.side_effect = [
         subprocess.TimeoutExpired(["ffmpeg"], timeout=2),
         0,
@@ -461,7 +574,7 @@ def test_webm_encoder_close_is_idempotent_and_kills_after_timeout(monkeypatch):
 
 def test_webm_encoder_close_continues_after_cleanup_errors(monkeypatch):
     process = _mock_process()
-    process.poll.return_value = None
+    process.poll.side_effect = [None, 0]
     process.stdin.close.side_effect = BrokenPipeError("stdin closed")
     process.terminate.side_effect = OSError("terminate failed")
     process.stdout.close.side_effect = OSError("stdout close failed")
@@ -477,6 +590,31 @@ def test_webm_encoder_close_continues_after_cleanup_errors(monkeypatch):
     process.wait.assert_called_once_with(timeout=2)
     process.stdout.close.assert_called_once_with()
     process.stderr.close.assert_called_once_with()
+
+
+def test_webm_encoder_close_retries_when_process_remains_alive(monkeypatch):
+    process = _mock_process()
+    process.poll.side_effect = [None, None, None, 0]
+    process.wait.side_effect = [
+        subprocess.TimeoutExpired(["ffmpeg"], timeout=2),
+        OSError("wait failed"),
+        0,
+    ]
+    process.kill.side_effect = [OSError("kill failed")]
+    process.stdout.close.side_effect = [OSError("stdout close failed"), None]
+    process.stderr.close.side_effect = [OSError("stderr close failed"), None]
+    _install_mock_process(monkeypatch, process)
+    encoder = WebMOpusEncoder(sample_rate=24000)
+
+    encoder.close()
+    encoder.close()
+    encoder.close()
+
+    assert process.terminate.call_count == 2
+    process.kill.assert_called_once_with()
+    assert process.wait.call_count == 3
+    assert process.stdout.close.call_count == 2
+    assert process.stderr.close.call_count == 2
 
 
 def test_webm_encoder_close_retries_stdin_after_close_input_error(monkeypatch):

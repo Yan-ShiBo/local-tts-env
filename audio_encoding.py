@@ -48,6 +48,7 @@ def encode_ogg_opus(
     bitrate: str = "48k",
 ) -> bytes:
     try:
+        timeout = max(30.0, len(audio) / sample_rate * 2 + 10)
         completed = subprocess.run(
             [
                 ffmpeg_executable(),
@@ -73,6 +74,7 @@ def encode_ogg_opus(
             ],
             input=pcm_f32le_bytes(audio),
             capture_output=True,
+            timeout=timeout,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except Exception as error:
@@ -124,7 +126,7 @@ class WebMOpusEncoder:
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 bufsize=0,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
@@ -135,7 +137,14 @@ class WebMOpusEncoder:
         if self._input_closed or self.process.stdin is None:
             raise AudioEncodingError("WebM encoder input is closed")
         try:
-            self.process.stdin.write(pcm_f32le_bytes(audio))
+            remaining = memoryview(pcm_f32le_bytes(audio))
+            while remaining:
+                written = self.process.stdin.write(remaining)
+                if not written:
+                    raise AudioEncodingError("WebM encoding failed")
+                remaining = remaining[written:]
+        except AudioEncodingError:
+            raise
         except Exception as error:
             raise AudioEncodingError("WebM encoding failed") from error
 
@@ -197,7 +206,10 @@ class WebMOpusEncoder:
                 except Exception:
                     pass
 
-        self._closed = True
+        try:
+            self._closed = self.process.poll() is not None
+        except Exception:
+            self._closed = False
 
     def _kill_process(self) -> None:
         try:
