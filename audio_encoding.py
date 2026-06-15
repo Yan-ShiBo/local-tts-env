@@ -36,7 +36,10 @@ def validate_ffmpeg() -> str:
 
 
 def pcm_f32le_bytes(audio: np.ndarray) -> bytes:
-    return np.ascontiguousarray(audio, dtype="<f4").reshape(-1).tobytes()
+    try:
+        return np.ascontiguousarray(audio, dtype="<f4").reshape(-1).tobytes()
+    except Exception as error:
+        raise AudioEncodingError("PCM conversion failed") from error
 
 
 def encode_ogg_opus(

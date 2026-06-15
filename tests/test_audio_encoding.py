@@ -131,6 +131,25 @@ def test_pcm_f32le_bytes_is_contiguous_little_endian():
     assert payload == np.array([0.25, -0.5], dtype="<f4").tobytes()
 
 
+def test_pcm_f32le_bytes_wraps_invalid_input():
+    audio = np.array([object()], dtype=object)
+
+    with pytest.raises(AudioEncodingError, match="^PCM conversion failed$"):
+        pcm_f32le_bytes(audio)
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+def test_pcm_f32le_bytes_does_not_swallow_base_exceptions(monkeypatch, error_type):
+    monkeypatch.setattr(
+        audio_encoding.np,
+        "ascontiguousarray",
+        Mock(side_effect=error_type()),
+    )
+
+    with pytest.raises(error_type):
+        pcm_f32le_bytes(np.zeros(1, dtype=np.float32))
+
+
 def test_encode_ogg_opus_produces_opus_container():
     sample_rate = 24000
     time = np.arange(sample_rate // 10, dtype=np.float32) / sample_rate
