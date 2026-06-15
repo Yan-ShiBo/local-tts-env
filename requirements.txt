@@ -1,0 +1,10 @@
+# Kokoro TTS 模型
+kokoro>=0.9.4
+
+# API 服务器
+fastapi
+uvicorn[standard]
+pydantic
+
+# 音频处理
+soundfile
