@@ -19,6 +19,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -30,6 +32,8 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 SERVER_SCRIPT = SCRIPT_DIR / "server.py"
 SETTINGS_FILE = SCRIPT_DIR / "tray_settings.json"
 CONDA_ENV_NAME = "kokoro-tts"
+APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", SCRIPT_DIR)) / "KokoroTTS"
+LOG_FILE = APP_DATA_DIR / "server.log"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5000
@@ -41,12 +45,19 @@ VOICES = {
         ("af_sky", "af_sky - Bright"),
         ("af_nova", "af_nova - Clear"),
         ("af_jessica", "af_jessica - Pro"),
+        ("af_alloy", "af_alloy - Neutral"),
+        ("af_aoede", "af_aoede - Elegant"),
+        ("af_kore", "af_kore - Crisp"),
+        ("af_nicole", "af_nicole - Soft"),
+        ("af_river", "af_river - Smooth"),
     ],
     "American Male": [
         ("am_adam", "am_adam - Clear"),
         ("am_liam", "am_liam - Warm"),
         ("am_michael", "am_michael - Mature"),
         ("am_eric", "am_eric - Energetic"),
+        ("am_echo", "am_echo - Natural"),
+        ("am_fenrir", "am_fenrir - Deep"),
     ],
     "British Female": [
         ("bf_emma", "bf_emma - British"),
@@ -72,7 +83,7 @@ def find_conda_python(env_name: str) -> Path:
         if result.returncode == 0:
             envs = json.loads(result.stdout).get("envs", [])
             for env_path in envs:
-                if env_name in Path(env_path).name:
+                if Path(env_path).name == env_name:
                     python_exe = Path(env_path) / "python.exe"
                     if python_exe.exists():
                         return python_exe
@@ -92,8 +103,9 @@ def find_conda_python(env_name: str) -> Path:
         if p.exists():
             return p
 
-    # Fallback: current Python
-    return Path(sys.executable)
+    raise FileNotFoundError(
+        f"Conda environment '{env_name}' was not found. Run setup.bat first."
+    )
 
 
 def find_conda_pythonw(env_name: str) -> Path:
@@ -116,6 +128,11 @@ def load_settings():
                 defaults.update(saved)
     except Exception:
         pass
+    valid_voices = {voice_id for voices in VOICES.values() for voice_id, _ in voices}
+    if defaults["voice"] not in valid_voices:
+        defaults["voice"] = "af_bella"
+    if defaults["speed"] not in SPEEDS:
+        defaults["speed"] = 0.8
     return defaults
 
 
@@ -177,39 +194,72 @@ def create_icon_image(color="green"):
 class TrayApp:
     def __init__(self):
         self.server_process = None
+        self._log_handle = None
         self.settings = load_settings()
         self.tray_icon = None
         self.is_running = False
         self._lock = threading.Lock()
         self.python_exe = find_conda_python(CONDA_ENV_NAME)
 
-    def is_port_open(self, port=DEFAULT_PORT):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-            return s.connect_ex((DEFAULT_HOST, port)) == 0
+    def get_health(self, port=DEFAULT_PORT):
+        try:
+            with urllib.request.urlopen(
+                f"http://{DEFAULT_HOST}:{port}/health", timeout=1
+            ) as response:
+                data = json.load(response)
+            if (
+                response.status == 200
+                and data.get("service") == "kokoro-tts"
+                and data.get("ready") is True
+            ):
+                return data
+        except (OSError, ValueError, urllib.error.URLError):
+            pass
+        return None
 
     def start_server(self, _=None):
         with self._lock:
             if self.server_process and self.server_process.poll() is None:
                 return  # Already running
 
+            existing_health = self.get_health()
+            if existing_health:
+                self.is_running = True
+                self._update_icon("green", "Kokoro TTS - Running")
+                return
+
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(1)
+                if sock.connect_ex((DEFAULT_HOST, DEFAULT_PORT)) == 0:
+                    self.is_running = False
+                    self._update_icon(
+                        "red", f"Kokoro TTS - Port {DEFAULT_PORT} is occupied"
+                    )
+                    return
+
             self._update_icon("yellow", "Kokoro TTS - Starting...")
 
             env = os.environ.copy()
             env["PYTHONIOENCODING"] = "utf-8"
+            env["KOKORO_HOST"] = DEFAULT_HOST
+            env["KOKORO_PORT"] = str(DEFAULT_PORT)
+            env["KOKORO_VOICE"] = self.settings["voice"]
+            env["KOKORO_SPEED"] = str(self.settings["speed"])
 
             # Start server process (hidden, no window)
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0  # SW_HIDE
 
+            APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+            self._log_handle = open(LOG_FILE, "a", encoding="utf-8")
             self.server_process = subprocess.Popen(
                 [str(self.python_exe), str(SERVER_SCRIPT)],
                 cwd=str(SCRIPT_DIR),
                 env=env,
                 startupinfo=startupinfo,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=self._log_handle,
+                stderr=subprocess.STDOUT,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
 
@@ -219,8 +269,9 @@ class TrayApp:
                 if self.server_process.poll() is not None:
                     self.is_running = False
                     self._update_icon("red", "Kokoro TTS - Failed to start")
+                    self._close_log()
                     return
-                if self.is_port_open():
+                if self.get_health():
                     self.is_running = True
                     self._update_icon("green", "Kokoro TTS - Running")
                     return
@@ -239,6 +290,11 @@ class TrayApp:
                 except subprocess.TimeoutExpired:
                     self.server_process.kill()
             self.server_process = None
+            self._close_log()
+            if self.get_health():
+                self.is_running = True
+                self._update_icon("green", "Kokoro TTS - External server running")
+                return
             self.is_running = False
             self._update_icon("red", "Kokoro TTS - Stopped")
 
@@ -255,6 +311,12 @@ class TrayApp:
 
     def open_project_dir(self, _=None):
         os.startfile(str(SCRIPT_DIR))
+
+    def open_log(self, _=None):
+        APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if not LOG_FILE.exists():
+            LOG_FILE.touch()
+        os.startfile(str(LOG_FILE))
 
     def set_voice(self, voice_id):
         def _set(_=None):
@@ -279,6 +341,11 @@ class TrayApp:
         if self.tray_icon:
             self.tray_icon.icon = create_icon_image(color)
             self.tray_icon.title = title
+
+    def _close_log(self):
+        if self._log_handle:
+            self._log_handle.close()
+            self._log_handle = None
 
     def _build_menu(self):
         import pystray
@@ -318,7 +385,8 @@ class TrayApp:
             Item("Speed", pystray.Menu(*speed_items)),
             pystray.Menu.SEPARATOR,
             Item("Open Test Page", self.open_test_page,
-                 enabled=lambda _: self.is_running),
+                  enabled=lambda _: self.is_running),
+            Item("Open Server Log", self.open_log),
             Item("Open Project Folder", self.open_project_dir),
             pystray.Menu.SEPARATOR,
             Item("Exit", self.quit_app),

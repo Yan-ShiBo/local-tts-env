@@ -50,7 +50,7 @@ Download from [eSpeak-NG Releases](https://github.com/espeak-ng/espeak-ng/releas
 
 ```powershell
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/local-tts-env.git
+git clone https://github.com/Yan-ShiBo/local-tts-env.git
 cd local-tts-env
 
 # Double-click setup.bat, or run manually:
@@ -58,7 +58,6 @@ conda create -n kokoro-tts python=3.10 -y
 conda activate kokoro-tts
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
-pip install pystray Pillow
 ```
 
 ### 3. Start the Server
@@ -121,6 +120,15 @@ Returns `audio/wav` stream.
 ### `GET /health` — Server status
 ### `GET /voices` — Available voices
 ### `GET /` — Built-in test page
+
+## ✅ Tests
+
+```powershell
+conda run -n kokoro-tts python -m unittest discover -s tests -v
+```
+
+The default suite uses a fake pipeline and does not load Kokoro or CUDA.
+The detailed expert review is in `docs/expert-review-2026-06-15.md`.
 
 ## License
 

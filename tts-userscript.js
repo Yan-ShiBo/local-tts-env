@@ -1,14 +1,17 @@
 // ==UserScript==
 // @name         Kokoro TTS 划词朗读
-// @namespace    https://github.com/local-tts
-// @version      1.1.0
+// @namespace    https://github.com/Yan-ShiBo/local-tts-env
+// @version      1.2.0
 // @description  选中英文文本，一键使用本地 Kokoro TTS 进行高质量朗读
 // @author       You
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      127.0.0.1
 // @run-at       document-end
+// @noframes
 // ==/UserScript==
 
 (function () {
@@ -71,6 +74,8 @@
 
   let floatingBtn = null;
   let currentAudio = null;
+  let currentRequest = null;
+  let requestGeneration = 0;
   let isLoading = false;
   let settingsPanel = null;
   let settingsVisible = false;
@@ -78,13 +83,24 @@
   // Load saved settings
   function loadSettings() {
     try {
-      const saved = JSON.parse(localStorage.getItem("kokoro-tts-settings"));
-      return { ...DEFAULTS, ...saved };
+      const saved = GM_getValue("kokoro-tts-settings", DEFAULTS);
+      const voiceExists = VOICES.some((group) =>
+        group.voices.some((voice) => voice.id === saved.voice)
+      );
+      const speedExists = SPEEDS.some((speed) => speed.value === saved.speed);
+      return {
+        voice: voiceExists ? saved.voice : DEFAULTS.voice,
+        speed: speedExists ? saved.speed : DEFAULTS.speed,
+      };
     } catch { return { ...DEFAULTS }; }
   }
 
   function saveSettings(settings) {
-    localStorage.setItem("kokoro-tts-settings", JSON.stringify(settings));
+    try {
+      GM_setValue("kokoro-tts-settings", settings);
+    } catch (err) {
+      console.error("[Kokoro TTS] Cannot save settings", err);
+    }
   }
 
   let settings = loadSettings();
@@ -148,8 +164,7 @@
     /* -- Loading state -- */
     .tts-speak-btn.loading {
       background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-      cursor: wait;
-      pointer-events: none;
+      cursor: pointer;
     }
 
     .tts-speak-btn.loading .tts-icon {
@@ -435,10 +450,12 @@
       }
       settingsVisible = false;
       gearBtn.classList.remove("active");
+      gearBtn.setAttribute("aria-expanded", "false");
     } else {
       createSettingsPanel();
       settingsVisible = true;
       gearBtn.classList.add("active");
+      gearBtn.setAttribute("aria-expanded", "true");
     }
   }
 
@@ -447,7 +464,10 @@
   gearBtn.className = "tts-settings-gear";
   gearBtn.innerHTML = "\u2699\uFE0F";
   gearBtn.title = "Kokoro TTS Settings";
+  gearBtn.setAttribute("aria-label", "Kokoro TTS settings");
+  gearBtn.setAttribute("aria-expanded", "false");
   gearBtn.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
     e.preventDefault();
     e.stopPropagation();
     toggleSettings();
@@ -475,13 +495,35 @@
     if (currentAudio) {
       currentAudio.pause();
       currentAudio.src = "";
-      URL.revokeObjectURL(currentAudio._blobUrl);
+      if (currentAudio._blobUrl) {
+        URL.revokeObjectURL(currentAudio._blobUrl);
+        currentAudio._blobUrl = null;
+      }
       currentAudio = null;
     }
   }
 
+  function cancelRequest() {
+    requestGeneration += 1;
+    if (currentRequest) {
+      currentRequest.abort();
+      currentRequest = null;
+    }
+    isLoading = false;
+  }
+
+  function removeSpecificButton(container) {
+    if (!container || !container.isConnected) return;
+    container.style.animation = "tts-fade-out 0.15s ease-in forwards";
+    setTimeout(() => {
+      container.remove();
+      if (floatingBtn === container) floatingBtn = null;
+    }, 150);
+  }
+
   function showButton(x, y, text) {
     removeButton();
+    cancelRequest();
     stopAudio();
 
     const container = document.createElement("div");
@@ -492,11 +534,20 @@
     btn.innerHTML = '<span class="tts-icon">\uD83D\uDD0A</span><span class="tts-label">Read</span>';
 
     btn.addEventListener("click", (e) => {
+      if (!e.isTrusted) return;
       e.preventDefault();
       e.stopPropagation();
 
       if (btn.classList.contains("playing")) {
         stopAudio();
+        btn.className = "tts-speak-btn";
+        btn.innerHTML =
+          '<span class="tts-icon">\uD83D\uDD0A</span><span class="tts-label">Read</span>';
+        return;
+      }
+
+      if (btn.classList.contains("loading")) {
+        cancelRequest();
         btn.className = "tts-speak-btn";
         btn.innerHTML =
           '<span class="tts-icon">\uD83D\uDD0A</span><span class="tts-label">Read</span>';
@@ -530,18 +581,23 @@
    * Call TTS API and play audio
    */
   async function speak(text, btnElement) {
-    if (isLoading) return;
+    cancelRequest();
+    stopAudio();
     isLoading = true;
+    const generation = requestGeneration;
+    const buttonContainer = btnElement
+      ? btnElement.closest(".tts-float-container")
+      : null;
 
     if (btnElement) {
       btnElement.className = "tts-speak-btn loading";
       btnElement.innerHTML =
-        '<span class="tts-icon">\u23F3</span><span class="tts-label">Generating...</span>';
+        '<span class="tts-icon">\u23F9</span><span class="tts-label">Cancel</span>';
     }
 
     try {
       const audioBlob = await new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
+        currentRequest = GM_xmlhttpRequest({
           method: "POST",
           url: API_URL,
           headers: { "Content-Type": "application/json" },
@@ -553,6 +609,7 @@
           responseType: "blob",
           timeout: 60000,
           onload: (response) => {
+            if (generation !== requestGeneration) return;
             if (response.status >= 200 && response.status < 300) {
               resolve(response.response);
             } else {
@@ -564,6 +621,7 @@
             }
           },
           onerror: () => {
+            if (generation !== requestGeneration) return;
             reject(
               new Error(
                 "Cannot connect to TTS server. Run start.bat first."
@@ -571,12 +629,15 @@
             );
           },
           ontimeout: () => {
+            if (generation !== requestGeneration) return;
             reject(new Error("Request timeout. Text may be too long."));
           },
+          onabort: () => reject(new Error("Request cancelled.")),
         });
       });
 
-      stopAudio();
+      if (generation !== requestGeneration) return;
+      currentRequest = null;
       const blobUrl = URL.createObjectURL(audioBlob);
       const audio = new Audio(blobUrl);
       audio._blobUrl = blobUrl;
@@ -589,17 +650,25 @@
       }
 
       audio.addEventListener("ended", () => {
-        URL.revokeObjectURL(blobUrl);
-        currentAudio = null;
+        if (audio._blobUrl) {
+          URL.revokeObjectURL(audio._blobUrl);
+          audio._blobUrl = null;
+        }
+        if (currentAudio === audio) currentAudio = null;
         if (btnElement) {
           btnElement.className = "tts-speak-btn";
           btnElement.innerHTML =
             '<span class="tts-icon">\u2705</span><span class="tts-label">Done</span>';
-          setTimeout(() => removeButton(), 2000);
+          setTimeout(() => removeSpecificButton(buttonContainer), 2000);
         }
       });
 
       audio.addEventListener("error", () => {
+        if (audio._blobUrl) {
+          URL.revokeObjectURL(audio._blobUrl);
+          audio._blobUrl = null;
+        }
+        if (currentAudio === audio) currentAudio = null;
         if (btnElement) {
           btnElement.className = "tts-speak-btn error";
           btnElement.innerHTML =
@@ -609,14 +678,19 @@
 
       await audio.play();
     } catch (err) {
+      if (generation !== requestGeneration) return;
       console.error("[Kokoro TTS]", err);
+      stopAudio();
       if (btnElement) {
         btnElement.className = "tts-speak-btn error";
         btnElement.innerHTML = `<span class="tts-icon">\u274C</span><span class="tts-label">${err.message.substring(0, 30)}</span>`;
-        setTimeout(() => removeButton(), 4000);
+        setTimeout(() => removeSpecificButton(buttonContainer), 4000);
       }
     } finally {
-      isLoading = false;
+      if (generation === requestGeneration) {
+        currentRequest = null;
+        isLoading = false;
+      }
     }
   }
 
@@ -626,6 +700,7 @@
 
   // Text selection -> show button
   document.addEventListener("mouseup", (e) => {
+    if (!e.isTrusted) return;
     if (
       floatingBtn &&
       (floatingBtn.contains(e.target) || e.target.closest(".tts-float-container"))
@@ -655,13 +730,13 @@
 
   // Click elsewhere -> remove button
   document.addEventListener("mousedown", (e) => {
+    if (!e.isTrusted) return;
     if (
       floatingBtn &&
       !floatingBtn.contains(e.target) &&
       !e.target.closest(".tts-float-container")
     ) {
       removeButton();
-      stopAudio();
     }
     // Click outside settings panel -> close it
     if (
@@ -676,14 +751,15 @@
 
   // Keyboard shortcut Ctrl+Shift+S
   document.addEventListener("keydown", (e) => {
+    if (!e.isTrusted) return;
     if (
       e.ctrlKey === SHORTCUT.ctrl &&
       e.shiftKey === SHORTCUT.shift &&
       e.key.toUpperCase() === SHORTCUT.key
     ) {
-      e.preventDefault();
       const text = getSelectedText();
       if (text.length > 1) {
+        e.preventDefault();
         const selection = window.getSelection();
         if (selection.rangeCount > 0) {
           const range = selection.getRangeAt(0);
@@ -710,6 +786,11 @@
     },
     { passive: true }
   );
+
+  window.addEventListener("beforeunload", () => {
+    cancelRequest();
+    stopAudio();
+  });
 
   console.log(
     "%c[Kokoro TTS] Script loaded. Select text to read, or press Ctrl+Shift+S",

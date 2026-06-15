@@ -1,6 +1,10 @@
 @echo off
 chcp 65001 >nul 2>nul
+setlocal
 title Kokoro TTS Setup
+
+set "ENV_NAME=kokoro-tts"
+set "PROJECT_DIR=%~dp0"
 
 echo.
 echo ========================================
@@ -8,57 +12,83 @@ echo    Kokoro TTS Environment Setup
 echo ========================================
 echo.
 
-:: -- Step 0: Check eSpeak-NG --
-echo [0/3] Checking eSpeak-NG...
+echo [0/4] Checking prerequisites...
+where conda >nul 2>nul
+if errorlevel 1 (
+    echo [ERROR] Conda was not found in PATH.
+    echo         Install Miniconda or Anaconda, then reopen this terminal.
+    goto :fail
+)
+
 where espeak-ng >nul 2>nul
 if errorlevel 1 (
-    echo.
-    echo [WARNING] eSpeak-NG not found!
-    echo.
-    echo   Please install it manually:
-    echo   1. Visit https://github.com/espeak-ng/espeak-ng/releases
-    echo   2. Download the latest Windows .msi installer
-    echo   3. Add install path to system PATH
-    echo      (usually C:\Program Files\eSpeak NG)
-    echo   4. Restart terminal and re-run this script
-    echo.
-    pause
-    exit /b 1
+    echo [ERROR] eSpeak-NG was not found in PATH.
+    echo         Install it from:
+    echo         https://github.com/espeak-ng/espeak-ng/releases
+    goto :fail
 )
-echo [OK] eSpeak-NG installed
+echo [OK] Conda and eSpeak-NG are available.
 echo.
 
-:: -- Step 1: Create conda env --
-echo [1/3] Creating Conda environment (Python 3.10)...
-call conda create -n kokoro-tts python=3.10 -y
+echo [1/4] Checking Conda environment...
+call conda env list | findstr /R /C:"^%ENV_NAME% " >nul
 if errorlevel 1 (
-    echo [INFO] Environment may already exist, continuing...
+    echo Creating %ENV_NAME% with Python 3.10...
+    call conda create -n "%ENV_NAME%" python=3.10 -y
+    if errorlevel 1 (
+        echo [ERROR] Failed to create Conda environment.
+        goto :fail
+    )
+) else (
+    echo [OK] Environment already exists.
 )
-call conda activate kokoro-tts
-echo [OK] Environment activated
 echo.
 
-:: -- Step 2: Install PyTorch (CUDA 12.4) --
-echo [2/3] Installing PyTorch (CUDA 12.4)...
-echo    This may take a few minutes depending on network speed...
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
-echo [OK] PyTorch installed
+echo [2/4] Installing PyTorch 2.6.0 with CUDA 12.4...
+call conda run -n "%ENV_NAME%" python -m pip install ^
+    torch==2.6.0 torchaudio==2.6.0 ^
+    --index-url https://download.pytorch.org/whl/cu124
+if errorlevel 1 (
+    echo [ERROR] PyTorch installation failed.
+    goto :fail
+)
 echo.
 
-:: -- Step 3: Install project dependencies --
-echo [3/3] Installing project dependencies (Kokoro TTS + FastAPI)...
-pip install -r "%~dp0requirements.txt"
-
-:: Install tray app dependencies
-pip install pystray Pillow
-echo [OK] Dependencies installed
+echo [3/4] Installing project dependencies...
+call conda run -n "%ENV_NAME%" python -m pip install -r "%PROJECT_DIR%requirements.txt"
+if errorlevel 1 (
+    echo [ERROR] Project dependency installation failed.
+    goto :fail
+)
 echo.
 
+echo [4/4] Verifying the environment...
+call conda run -n "%ENV_NAME%" python -m pip check
+if errorlevel 1 (
+    echo [ERROR] Dependency verification failed.
+    goto :fail
+)
+
+call conda run -n "%ENV_NAME%" python -c "import fastapi, kokoro, PIL, pystray, soundfile, torch; print('[OK] Imports passed. CUDA:', torch.cuda.is_available())"
+if errorlevel 1 (
+    echo [ERROR] Import verification failed.
+    goto :fail
+)
+
+echo.
 echo ========================================
 echo    Setup complete!
 echo    Next: double-click start.bat
 echo          or Kokoro TTS.pyw
 echo ========================================
 echo.
-
 pause
+exit /b 0
+
+:fail
+echo.
+echo Setup stopped because a required step failed.
+echo No success message has been emitted.
+echo.
+pause
+exit /b 1

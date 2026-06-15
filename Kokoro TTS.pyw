@@ -2,6 +2,7 @@
 import json
 import subprocess
 import sys
+import tkinter.messagebox
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -20,7 +21,7 @@ def find_pythonw():
         if result.returncode == 0:
             envs = json.loads(result.stdout).get("envs", [])
             for env_path in envs:
-                if CONDA_ENV_NAME in Path(env_path).name:
+                if Path(env_path).name == CONDA_ENV_NAME:
                     pythonw = Path(env_path) / "pythonw.exe"
                     if pythonw.exists():
                         return str(pythonw)
@@ -40,11 +41,17 @@ def find_pythonw():
         if pythonw.exists():
             return str(pythonw)
 
-    # Fallback
-    return sys.executable
+    return None
 
 
 pythonw = find_pythonw()
+if not pythonw:
+    tkinter.messagebox.showerror(
+        "Kokoro TTS",
+        "找不到 kokoro-tts Conda 环境。请先运行 setup.bat。",
+    )
+    raise SystemExit(1)
+
 subprocess.Popen(
     [pythonw, str(TRAY_SCRIPT)],
     cwd=str(SCRIPT_DIR),

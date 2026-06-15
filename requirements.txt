@@ -1,10 +1,14 @@
 # Kokoro TTS 模型
-kokoro>=0.9.4
+kokoro==0.9.4
 
 # API 服务器
-fastapi
-uvicorn[standard]
-pydantic
+fastapi==0.136.3
+uvicorn[standard]>=0.34,<1
+pydantic==2.13.4
 
 # 音频处理
-soundfile
+soundfile==0.14.0
+
+# Windows tray application
+pystray==0.19.5
+Pillow==12.2.0
