@@ -8,6 +8,7 @@ pydantic==2.13.4
 
 # 音频处理
 soundfile==0.14.0
+imageio-ffmpeg==0.6.0
 
 # Windows tray application
 pystray==0.19.5

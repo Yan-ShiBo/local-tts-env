@@ -69,9 +69,15 @@ if errorlevel 1 (
     goto :fail
 )
 
-call conda run -n "%ENV_NAME%" python -c "import fastapi, kokoro, PIL, pystray, soundfile, torch; print('[OK] Imports passed. CUDA:', torch.cuda.is_available())"
+call conda run -n "%ENV_NAME%" python -c "import fastapi, imageio_ffmpeg, kokoro, PIL, pystray, soundfile, torch; print('[OK] Imports passed. CUDA:', torch.cuda.is_available())"
 if errorlevel 1 (
     echo [ERROR] Import verification failed.
+    goto :fail
+)
+
+call conda run -n "%ENV_NAME%" python -c "import imageio_ffmpeg, pathlib, subprocess; exe=imageio_ffmpeg.get_ffmpeg_exe(); assert pathlib.Path(exe).is_file(); subprocess.run([exe, '-version'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)); print('[OK] Bundled FFmpeg passed:', exe)"
+if errorlevel 1 (
+    echo [ERROR] Bundled FFmpeg verification failed.
     goto :fail
 )
 
