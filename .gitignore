@@ -11,6 +11,7 @@ tray_settings.json
 # IDE
 .vscode/
 .idea/
+.worktrees/
 
 # OS
 Thumbs.db
