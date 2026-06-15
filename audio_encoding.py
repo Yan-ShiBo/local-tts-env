@@ -5,9 +5,6 @@ import imageio_ffmpeg
 import numpy as np
 
 
-_PROCESS_ERRORS = (OSError, subprocess.SubprocessError)
-
-
 class AudioEncodingError(RuntimeError):
     pass
 
@@ -31,7 +28,7 @@ def validate_ffmpeg() -> str:
             timeout=10,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-    except (OSError, subprocess.SubprocessError) as error:
+    except Exception as error:
         raise AudioEncodingError("FFmpeg is unavailable") from error
     if completed.returncode != 0:
         raise AudioEncodingError("FFmpeg is unavailable")
@@ -75,7 +72,7 @@ def encode_ogg_opus(
             capture_output=True,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-    except _PROCESS_ERRORS as error:
+    except Exception as error:
         raise AudioEncodingError("OGG encoding failed") from error
     if (
         completed.returncode != 0
@@ -128,7 +125,7 @@ class WebMOpusEncoder:
                 bufsize=0,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        except _PROCESS_ERRORS as error:
+        except Exception as error:
             raise AudioEncodingError("WebM encoding failed") from error
 
     def write(self, audio: np.ndarray) -> None:
@@ -136,14 +133,14 @@ class WebMOpusEncoder:
             raise AudioEncodingError("WebM encoder input is closed")
         try:
             self.process.stdin.write(pcm_f32le_bytes(audio))
-        except _PROCESS_ERRORS as error:
+        except Exception as error:
             raise AudioEncodingError("WebM encoding failed") from error
 
     def close_input(self) -> None:
         if not self._input_closed and self.process.stdin is not None:
             try:
                 self.process.stdin.close()
-            except _PROCESS_ERRORS as error:
+            except Exception as error:
                 raise AudioEncodingError("WebM encoding failed") from error
             self._input_closed = True
 
@@ -152,13 +149,13 @@ class WebMOpusEncoder:
             return b""
         try:
             return self.process.stdout.read(size)
-        except _PROCESS_ERRORS as error:
+        except Exception as error:
             raise AudioEncodingError("WebM encoding failed") from error
 
     def wait(self, timeout: float = 10.0) -> None:
         try:
             return_code = self.process.wait(timeout=timeout)
-        except _PROCESS_ERRORS as error:
+        except Exception as error:
             raise AudioEncodingError("WebM encoding failed") from error
         if return_code != 0:
             raise AudioEncodingError("WebM encoding failed")
