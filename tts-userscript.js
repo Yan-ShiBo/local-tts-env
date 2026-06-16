@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kokoro TTS 划词朗读
 // @namespace    https://github.com/Yan-ShiBo/local-tts-env
-// @version      1.3.0
+// @version      1.4.0
 // @description  选中英文文本，一键使用本地 Kokoro TTS 进行高质量朗读
 // @author       Yan-ShiBo
 // @match        *://*/*
@@ -17,6 +17,8 @@
 // ==/UserScript==
 
 const KokoroTTSCore = (() => {
+  const WEBM_OPUS_MIME = 'audio/webm; codecs="opus"';
+
   function createRequestGate() {
     let generation = 0;
     let request = null;
@@ -57,6 +59,11 @@ const KokoroTTSCore = (() => {
 
   function releaseAudio(audio, urlApi = URL) {
     if (!audio) return;
+    if (audio._cleanup) {
+      const cleanup = audio._cleanup;
+      audio._cleanup = null;
+      cleanup();
+    }
     audio.pause();
     audio.src = "";
     if (audio._blobUrl) {
@@ -65,7 +72,161 @@ const KokoroTTSCore = (() => {
     }
   }
 
-  return { createRequestGate, releaseAudio };
+  function supportsWebMOpus(mediaSourceApi) {
+    if (
+      !mediaSourceApi ||
+      typeof mediaSourceApi.isTypeSupported !== "function"
+    ) {
+      return false;
+    }
+    try {
+      return mediaSourceApi.isTypeSupported(WEBM_OPUS_MIME) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  function choosePlaybackMode(mediaSourceApi) {
+    return supportsWebMOpus(mediaSourceApi) ? "stream" : "ogg";
+  }
+
+  function formatPlaybackProgress({ currentTime = 0, duration = 0, streamEnded = false } = {}) {
+    const seconds = Math.max(0, Math.floor(Number(currentTime) || 0));
+    if (!streamEnded || !Number.isFinite(duration) || duration <= 0) {
+      return { determinate: false, label: `${seconds}s`, percent: 0 };
+    }
+
+    const rawPercent = ((Number(currentTime) || 0) / duration) * 100;
+    const percent = Math.max(0, Math.min(100, Math.round(rawPercent)));
+    return { determinate: true, label: `${percent}%`, percent };
+  }
+
+  function createAppendQueue(sourceBuffer, mediaSource) {
+    const queue = [];
+    const endWaiters = [];
+    let pending = null;
+    let ending = false;
+    let ended = false;
+    let closed = false;
+
+    function removeListeners() {
+      if (typeof sourceBuffer.removeEventListener === "function") {
+        sourceBuffer.removeEventListener("updateend", onUpdateEnd);
+        sourceBuffer.removeEventListener("error", onError);
+      }
+    }
+
+    function rejectWaiters(error) {
+      while (queue.length) {
+        queue.shift().reject(error);
+      }
+      if (pending) {
+        pending.reject(error);
+        pending = null;
+      }
+      while (endWaiters.length) {
+        endWaiters.shift().reject(error);
+      }
+    }
+
+    function finishEndWaiters() {
+      while (endWaiters.length) {
+        endWaiters.shift().resolve();
+      }
+    }
+
+    function settleEndIfReady() {
+      if (!ending || ended || pending || sourceBuffer.updating || queue.length) {
+        return;
+      }
+
+      try {
+        if (mediaSource && mediaSource.readyState === "open") {
+          mediaSource.endOfStream();
+        }
+        ended = true;
+        removeListeners();
+        finishEndWaiters();
+      } catch (error) {
+        closed = true;
+        removeListeners();
+        rejectWaiters(error);
+      }
+    }
+
+    function pump() {
+      if (closed || pending || sourceBuffer.updating || queue.length === 0) {
+        settleEndIfReady();
+        return;
+      }
+
+      pending = queue.shift();
+      try {
+        sourceBuffer.appendBuffer(pending.data);
+      } catch (error) {
+        const failed = pending;
+        pending = null;
+        failed.reject(error);
+        closed = true;
+        removeListeners();
+        rejectWaiters(error);
+      }
+    }
+
+    function onUpdateEnd() {
+      if (pending) {
+        pending.resolve();
+        pending = null;
+      }
+      pump();
+    }
+
+    function onError(event) {
+      const error =
+        event instanceof Error ? event : new Error("MediaSource append failed");
+      closed = true;
+      removeListeners();
+      rejectWaiters(error);
+    }
+
+    sourceBuffer.addEventListener("updateend", onUpdateEnd);
+    sourceBuffer.addEventListener("error", onError);
+
+    return {
+      append(data) {
+        if (closed) {
+          return Promise.reject(new Error("Append queue is closed"));
+        }
+        return new Promise((resolve, reject) => {
+          queue.push({ data, resolve, reject });
+          pump();
+        });
+      },
+      end() {
+        ending = true;
+        return new Promise((resolve, reject) => {
+          endWaiters.push({ resolve, reject });
+          settleEndIfReady();
+        });
+      },
+      close() {
+        if (closed) return;
+        closed = true;
+        removeListeners();
+        rejectWaiters(new Error("Append queue is closed"));
+      },
+    };
+  }
+
+  return {
+    WEBM_OPUS_MIME,
+    choosePlaybackMode,
+    createAppendQueue,
+    createRequestGate,
+    formatPlaybackProgress,
+    releaseAudio,
+    supportsWebMOpus,
+  };
 })();
 
 if (typeof module !== "undefined" && module.exports) {
@@ -82,6 +243,8 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
 
   const API_BASE = "http://127.0.0.1:5000";
   const API_URL = API_BASE + "/tts";
+  const API_STREAM_URL = API_BASE + "/tts/stream";
+  const API_OGG_URL = API_URL + "?format=ogg";
   const SHORTCUT = { ctrl: true, shift: true, key: "S" }; // Ctrl+Shift+S
 
   /* CATALOG:START */
@@ -168,6 +331,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
 
     /* -- Main button -- */
     .tts-speak-btn {
+      position: relative;
       display: inline-flex;
       align-items: center;
       gap: 6px;
@@ -187,6 +351,40 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       user-select: none;
       -webkit-user-select: none;
       line-height: 1;
+      overflow: hidden;
+      --tts-progress: 0%;
+    }
+
+    .tts-speak-btn.with-progress::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: var(--tts-progress);
+      border-radius: inherit;
+      background: rgba(255, 255, 255, 0.22);
+      pointer-events: none;
+      transition: width 0.18s ease;
+    }
+
+    .tts-speak-btn.with-progress.buffering::before {
+      left: -42%;
+      width: 42%;
+      background: linear-gradient(90deg,
+        rgba(255, 255, 255, 0.04) 0%,
+        rgba(255, 255, 255, 0.28) 50%,
+        rgba(255, 255, 255, 0.04) 100%);
+      animation: tts-buffer-bar 1.15s ease-in-out infinite;
+    }
+
+    .tts-speak-btn.with-progress .tts-icon,
+    .tts-speak-btn.with-progress .tts-label {
+      position: relative;
+      z-index: 1;
+    }
+
+    @keyframes tts-buffer-bar {
+      from { left: -42%; }
+      to   { left: 100%; }
     }
 
     .tts-speak-btn:hover {
@@ -568,6 +766,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       e.stopPropagation();
 
       if (btn.classList.contains("playing")) {
+        cancelRequest();
         stopAudio();
         btn.className = "tts-speak-btn";
         btn.innerHTML =
@@ -609,6 +808,239 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   /**
    * Call TTS API and play audio
    */
+  function setButtonHtml(btnElement, className, icon, label) {
+    if (!btnElement) return;
+    btnElement.className = className;
+    btnElement.style.removeProperty("--tts-progress");
+    btnElement.innerHTML =
+      `<span class="tts-icon">${icon}</span><span class="tts-label">${label}</span>`;
+  }
+
+  function setPlaybackProgress(btnElement, audio, streamEnded) {
+    if (!btnElement) return;
+    const progress = KokoroTTSCore.formatPlaybackProgress({
+      currentTime: audio.currentTime || 0,
+      duration: audio.duration,
+      streamEnded,
+    });
+    btnElement.className =
+      "tts-speak-btn playing with-progress " +
+      (progress.determinate ? "determinate" : "buffering");
+    btnElement.style.setProperty("--tts-progress", progress.percent + "%");
+    btnElement.innerHTML =
+      `<span class="tts-icon">\uD83D\uDD0A</span><span class="tts-label">${progress.label}</span>`;
+  }
+
+  function attachPlaybackUi(audio, btnElement, buttonContainer, isStreamEnded) {
+    const updateProgress = () => {
+      if (currentAudio !== audio) return;
+      setPlaybackProgress(btnElement, audio, isStreamEnded());
+    };
+
+    audio.addEventListener("timeupdate", updateProgress);
+    audio.addEventListener("durationchange", updateProgress);
+    audio.addEventListener("loadedmetadata", updateProgress);
+
+    audio.addEventListener("ended", () => {
+      if (currentAudio !== audio) return;
+      setPlaybackProgress(btnElement, audio, true);
+      KokoroTTSCore.releaseAudio(audio);
+      currentAudio = null;
+      if (btnElement) {
+        setButtonHtml(
+          btnElement,
+          "tts-speak-btn",
+          "\u2705",
+          "Done"
+        );
+        setTimeout(() => removeSpecificButton(buttonContainer), 2000);
+      }
+    });
+
+    audio.addEventListener("error", () => {
+      if (currentAudio !== audio) return;
+      KokoroTTSCore.releaseAudio(audio);
+      currentAudio = null;
+      if (btnElement) {
+        setButtonHtml(
+          btnElement,
+          "tts-speak-btn error",
+          "\u274C",
+          "Play failed"
+        );
+      }
+    });
+
+    return updateProgress;
+  }
+
+  async function fetchOggBlob(text, generation) {
+    return new Promise((resolve, reject) => {
+      const request = GM_xmlhttpRequest({
+        method: "POST",
+        url: API_OGG_URL,
+        headers: {
+          "Accept": "audio/ogg",
+          "Content-Type": "application/json",
+        },
+        data: JSON.stringify({
+          text: text,
+          voice: settings.voice,
+          speed: settings.speed,
+        }),
+        responseType: "blob",
+        timeout: 60000,
+        onload: (response) => {
+          if (!requestGate.isCurrent(generation)) return;
+          if (response.status >= 200 && response.status < 300) {
+            resolve(response.response);
+          } else {
+            reject(
+              new Error(
+                `Server returned ${response.status}: ${response.statusText}`
+              )
+            );
+          }
+        },
+        onerror: () => {
+          if (!requestGate.isCurrent(generation)) return;
+          reject(
+            new Error(
+              "Cannot connect to TTS server. Run start.bat first."
+            )
+          );
+        },
+        ontimeout: () => {
+          if (!requestGate.isCurrent(generation)) return;
+          reject(new Error("Request timeout. Text may be too long."));
+        },
+        onabort: () => reject(new Error("Request cancelled.")),
+      });
+      requestGate.attach(generation, request);
+    });
+  }
+
+  async function playBlobAudio(text, generation, btnElement, buttonContainer) {
+    const audioBlob = await fetchOggBlob(text, generation);
+    if (!requestGate.isCurrent(generation)) return;
+
+    const blobUrl = URL.createObjectURL(audioBlob);
+    const audio = new Audio(blobUrl);
+    audio._blobUrl = blobUrl;
+    currentAudio = audio;
+
+    const updateProgress = attachPlaybackUi(
+      audio,
+      btnElement,
+      buttonContainer,
+      () => true
+    );
+    updateProgress();
+
+    await audio.play();
+  }
+
+  function waitForSourceOpen(mediaSource) {
+    return new Promise((resolve, reject) => {
+      function cleanup() {
+        mediaSource.removeEventListener("sourceopen", onOpen);
+        mediaSource.removeEventListener("sourceclose", onClose);
+      }
+      function onOpen() {
+        cleanup();
+        resolve();
+      }
+      function onClose() {
+        cleanup();
+        reject(new Error("MediaSource closed before opening."));
+      }
+      mediaSource.addEventListener("sourceopen", onOpen);
+      mediaSource.addEventListener("sourceclose", onClose);
+    });
+  }
+
+  async function playStreamingAudio(text, generation, btnElement, buttonContainer) {
+    const mediaSource = new MediaSource();
+    const controller = new AbortController();
+    let reader = null;
+    let appendQueue = null;
+    let streamEnded = false;
+    let playPromise = null;
+
+    if (!requestGate.attach(generation, {
+      abort() {
+        controller.abort();
+      },
+    })) {
+      return;
+    }
+
+    const sourceOpenPromise = waitForSourceOpen(mediaSource);
+    const blobUrl = URL.createObjectURL(mediaSource);
+    const audio = new Audio(blobUrl);
+    audio._blobUrl = blobUrl;
+    audio._cleanup = () => {
+      controller.abort();
+      if (reader) reader.cancel().catch(() => {});
+      if (appendQueue) appendQueue.close();
+    };
+    currentAudio = audio;
+
+    const updateProgress = attachPlaybackUi(
+      audio,
+      btnElement,
+      buttonContainer,
+      () => streamEnded
+    );
+    updateProgress();
+
+    await sourceOpenPromise;
+    if (!requestGate.isCurrent(generation)) return;
+
+    const sourceBuffer = mediaSource.addSourceBuffer(KokoroTTSCore.WEBM_OPUS_MIME);
+    appendQueue = KokoroTTSCore.createAppendQueue(sourceBuffer, mediaSource);
+
+    playPromise = audio.play();
+    playPromise.catch(() => {});
+
+    const response = await fetch(API_STREAM_URL, {
+      method: "POST",
+      headers: {
+        "Accept": KokoroTTSCore.WEBM_OPUS_MIME,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text: text,
+        voice: settings.voice,
+        speed: settings.speed,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+    }
+    if (!response.body || typeof response.body.getReader !== "function") {
+      throw new Error("Streaming response is not supported by this browser.");
+    }
+
+    reader = response.body.getReader();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength) {
+        await appendQueue.append(value);
+        updateProgress();
+      }
+    }
+
+    streamEnded = true;
+    updateProgress();
+    await appendQueue.end();
+    updateProgress();
+    await playPromise;
+  }
+
   async function speak(text, btnElement) {
     stopAudio();
     isLoading = true;
@@ -618,95 +1050,35 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       : null;
 
     if (btnElement) {
-      btnElement.className = "tts-speak-btn loading";
-      btnElement.innerHTML =
-        '<span class="tts-icon">\u23F9</span><span class="tts-label">Cancel</span>';
+      setButtonHtml(
+        btnElement,
+        "tts-speak-btn loading",
+        "\u23F9",
+        "Cancel"
+      );
     }
 
     try {
-      const audioBlob = await new Promise((resolve, reject) => {
-        const request = GM_xmlhttpRequest({
-          method: "POST",
-          url: API_URL,
-          headers: { "Content-Type": "application/json" },
-          data: JSON.stringify({
-            text: text,
-            voice: settings.voice,
-            speed: settings.speed,
-          }),
-          responseType: "blob",
-          timeout: 60000,
-          onload: (response) => {
-            if (!requestGate.isCurrent(generation)) return;
-            if (response.status >= 200 && response.status < 300) {
-              resolve(response.response);
-            } else {
-              reject(
-                new Error(
-                  `Server returned ${response.status}: ${response.statusText}`
-                )
-              );
-            }
-          },
-          onerror: () => {
-            if (!requestGate.isCurrent(generation)) return;
-            reject(
-              new Error(
-                "Cannot connect to TTS server. Run start.bat first."
-              )
-            );
-          },
-          ontimeout: () => {
-            if (!requestGate.isCurrent(generation)) return;
-            reject(new Error("Request timeout. Text may be too long."));
-          },
-          onabort: () => reject(new Error("Request cancelled.")),
-        });
-        requestGate.attach(generation, request);
-      });
-
-      if (!requestGate.isCurrent(generation)) return;
-      requestGate.finish(generation);
-      const blobUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(blobUrl);
-      audio._blobUrl = blobUrl;
-      currentAudio = audio;
-
-      if (btnElement) {
-        btnElement.className = "tts-speak-btn playing";
-        btnElement.innerHTML =
-          '<span class="tts-icon">\uD83D\uDD0A</span><span class="tts-label">Playing...</span>';
+      if (
+        KokoroTTSCore.choosePlaybackMode(window.MediaSource) === "stream" &&
+        typeof fetch === "function"
+      ) {
+        await playStreamingAudio(text, generation, btnElement, buttonContainer);
+      } else {
+        await playBlobAudio(text, generation, btnElement, buttonContainer);
       }
-
-      audio.addEventListener("ended", () => {
-        KokoroTTSCore.releaseAudio(audio);
-        if (currentAudio === audio) currentAudio = null;
-        if (btnElement) {
-          btnElement.className = "tts-speak-btn";
-          btnElement.innerHTML =
-            '<span class="tts-icon">\u2705</span><span class="tts-label">Done</span>';
-          setTimeout(() => removeSpecificButton(buttonContainer), 2000);
-        }
-      });
-
-      audio.addEventListener("error", () => {
-        KokoroTTSCore.releaseAudio(audio);
-        if (currentAudio === audio) currentAudio = null;
-        if (btnElement) {
-          btnElement.className = "tts-speak-btn error";
-          btnElement.innerHTML =
-            '<span class="tts-icon">\u274C</span><span class="tts-label">Play failed</span>';
-        }
-      });
-
-      await audio.play();
     } catch (err) {
       if (!requestGate.isCurrent(generation)) return;
+      if (err && err.name === "AbortError") return;
       console.error("[Kokoro TTS]", err);
       stopAudio();
       if (btnElement) {
-        btnElement.className = "tts-speak-btn error";
-        btnElement.innerHTML = `<span class="tts-icon">\u274C</span><span class="tts-label">${err.message.substring(0, 30)}</span>`;
+        setButtonHtml(
+          btnElement,
+          "tts-speak-btn error",
+          "\u274C",
+          err.message.substring(0, 30)
+        );
         setTimeout(() => removeSpecificButton(buttonContainer), 4000);
       }
     } finally {

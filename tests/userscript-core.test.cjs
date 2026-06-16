@@ -9,6 +9,9 @@ test("userscript core can be imported without browser globals", () => {
   });
   assert.equal(typeof core.createRequestGate, "function");
   assert.equal(typeof core.releaseAudio, "function");
+  assert.equal(typeof core.supportsWebMOpus, "function");
+  assert.equal(typeof core.formatPlaybackProgress, "function");
+  assert.equal(typeof core.createAppendQueue, "function");
 });
 
 
@@ -71,4 +74,110 @@ test("audio blob URL is revoked at most once", () => {
   assert.deepEqual(revoked, ["blob:test"]);
   assert.equal(audio._blobUrl, null);
   assert.equal(audio.src, "");
+});
+
+
+test("audio cleanup hook is called at most once", () => {
+  const { releaseAudio } = require("../tts-userscript.js");
+  let cleanups = 0;
+  const audio = {
+    _cleanup: () => { cleanups += 1; },
+    _blobUrl: null,
+    src: "blob:test",
+    pause() {},
+  };
+
+  releaseAudio(audio);
+  releaseAudio(audio);
+
+  assert.equal(cleanups, 1);
+});
+
+
+test("webm opus support uses MediaSource codec probe", () => {
+  const { WEBM_OPUS_MIME, supportsWebMOpus, choosePlaybackMode } = require("../tts-userscript.js");
+  const supported = {
+    seen: [],
+    isTypeSupported(mime) {
+      this.seen.push(mime);
+      return mime === WEBM_OPUS_MIME;
+    },
+  };
+  const throwing = {
+    isTypeSupported() {
+      throw new Error("probe failed");
+    },
+  };
+
+  assert.equal(supportsWebMOpus(supported), true);
+  assert.deepEqual(supported.seen, [WEBM_OPUS_MIME]);
+  assert.equal(supportsWebMOpus(throwing), false);
+  assert.equal(supportsWebMOpus(null), false);
+  assert.equal(choosePlaybackMode(supported), "stream");
+  assert.equal(choosePlaybackMode(null), "ogg");
+});
+
+
+test("playback progress shows seconds while streaming and percent after duration is known", () => {
+  const { formatPlaybackProgress } = require("../tts-userscript.js");
+
+  assert.deepEqual(
+    formatPlaybackProgress({ currentTime: 7.42, duration: Number.NaN, streamEnded: false }),
+    { determinate: false, label: "7s", percent: 0 }
+  );
+  assert.deepEqual(
+    formatPlaybackProgress({ currentTime: 10, duration: 40, streamEnded: true }),
+    { determinate: true, label: "25%", percent: 25 }
+  );
+  assert.deepEqual(
+    formatPlaybackProgress({ currentTime: 50, duration: 40, streamEnded: true }),
+    { determinate: true, label: "100%", percent: 100 }
+  );
+});
+
+
+test("append queue preserves source buffer order and ends after pending updates", async () => {
+  const { createAppendQueue } = require("../tts-userscript.js");
+  const listeners = new Map();
+  const appended = [];
+  const sourceBuffer = {
+    updating: false,
+    addEventListener(type, handler) {
+      listeners.set(type, handler);
+    },
+    removeEventListener(type) {
+      listeners.delete(type);
+    },
+    appendBuffer(data) {
+      this.updating = true;
+      appended.push(Buffer.from(data).toString("utf8"));
+    },
+  };
+  const mediaSource = {
+    readyState: "open",
+    endCalls: 0,
+    endOfStream() {
+      this.endCalls += 1;
+    },
+  };
+
+  const queue = createAppendQueue(sourceBuffer, mediaSource);
+  const first = queue.append(Buffer.from("first"));
+  const second = queue.append(Buffer.from("second"));
+  assert.deepEqual(appended, ["first"]);
+
+  sourceBuffer.updating = false;
+  listeners.get("updateend")();
+  await first;
+  assert.deepEqual(appended, ["first", "second"]);
+
+  const end = queue.end();
+  assert.equal(mediaSource.endCalls, 0);
+  sourceBuffer.updating = false;
+  listeners.get("updateend")();
+  await second;
+  await end;
+
+  assert.deepEqual(appended, ["first", "second"]);
+  assert.equal(mediaSource.endCalls, 1);
 });
