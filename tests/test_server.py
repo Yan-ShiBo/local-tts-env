@@ -110,6 +110,93 @@ class ApiTests(unittest.TestCase):
             [("Hello world", "af_bella", 1.0)],
         )
 
+    def test_ogg_query_returns_opus(self):
+        response = self.client.post(
+            "/tts?format=ogg",
+            json={"text": "Hello world", "voice": "af_bella", "speed": 1.0},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "audio/ogg")
+        self.assertTrue(response.content.startswith(b"OggS"))
+        self.assertIn(b"OpusHead", response.content[:256])
+        self.assertEqual(
+            server.pipeline.calls,
+            [("Hello world", "af_bella", 1.0)],
+        )
+
+    def test_accept_ogg_returns_opus(self):
+        response = self.client.post(
+            "/tts",
+            headers={"Accept": "audio/ogg"},
+            json={"text": "Hello world"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "audio/ogg")
+        self.assertTrue(response.content.startswith(b"OggS"))
+
+    def test_query_format_overrides_accept_header(self):
+        response = self.client.post(
+            "/tts?format=wav",
+            headers={"Accept": "audio/ogg"},
+            json={"text": "Hello world"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "audio/wav")
+        self.assertTrue(response.content.startswith(b"RIFF"))
+
+    def test_unsupported_audio_format_returns_406(self):
+        cases = [
+            ("/tts?format=mp3", {}),
+            ("/tts", {"Accept": "audio/mpeg"}),
+        ]
+
+        for path, headers in cases:
+            with self.subTest(path=path, headers=headers):
+                response = self.client.post(
+                    path,
+                    headers=headers,
+                    json={"text": "Hello world"},
+                )
+
+                self.assertEqual(response.status_code, 406)
+        self.assertEqual(server.pipeline.calls, [])
+
+    def test_boundary_text_reaches_pipeline_unchanged(self):
+        cases = [
+            "...?!",
+            "I have 42 cats",
+            "Visit https://example.com/docs",
+            "Hello 世界 42",
+        ]
+
+        for text in cases:
+            with self.subTest(text=text):
+                response = self.client.post("/tts", json={"text": text})
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(server.pipeline.calls[-1][0], text)
+
+    def test_ogg_encoding_errors_are_not_exposed(self):
+        from audio_encoding import AudioEncodingError
+
+        with patch.object(
+            server,
+            "encode_ogg_opus",
+            create=True,
+            side_effect=AudioEncodingError(r"C:\secret\ffmpeg.exe"),
+        ):
+            response = self.client.post(
+                "/tts?format=ogg",
+                json={"text": "Hello world"},
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json()["detail"], "语音生成失败")
+        self.assertNotIn("secret", response.text)
+
     def test_invalid_requests_do_not_reach_pipeline(self):
         cases = [
             {"text": "Hello", "voice": "not-a-voice"},
@@ -164,6 +251,7 @@ class ApiTests(unittest.TestCase):
             "content"
         ]
         self.assertIn("audio/wav", content)
+        self.assertIn("audio/ogg", content)
         self.assertNotIn("application/json", content)
 
     def test_cors_does_not_allow_arbitrary_websites(self):

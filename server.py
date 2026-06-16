@@ -30,10 +30,11 @@ try:
 except ImportError:
     torch = None
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from audio_encoding import AudioEncodingError, encode_ogg_opus
 from tts_catalog import (
     AVAILABLE_VOICES,
     CATALOG as TTS_CATALOG,
@@ -61,6 +62,7 @@ SAMPLE_RATE = 24000
 SEGMENT_SILENCE_MS = int(os.environ.get("KOKORO_SEGMENT_SILENCE_MS", "0"))
 FADE_MS = int(os.environ.get("KOKORO_FADE_MS", "0"))
 WARMUP_ENABLED = os.environ.get("KOKORO_WARMUP", "1") != "0"
+SUPPORTED_AUDIO_FORMATS = {"wav", "ogg"}
 
 if VOICE not in AVAILABLE_VOICES:
     raise ValueError(f"Unsupported KOKORO_VOICE: {VOICE}")
@@ -270,6 +272,44 @@ def _run_inference(text: str, voice: str, speed: float):
     return _combine_audio_segments(audio_segments), SAMPLE_RATE
 
 
+def _select_audio_format(format_query: Optional[str], accept: Optional[str]) -> str:
+    if format_query is not None:
+        normalized = format_query.lower()
+        if normalized not in SUPPORTED_AUDIO_FORMATS:
+            raise HTTPException(status_code=406, detail="不支持的音频格式")
+        return normalized
+
+    normalized_accept = (accept or "*/*").lower()
+    if "audio/ogg" in normalized_accept:
+        return "ogg"
+    if (
+        "audio/wav" in normalized_accept
+        or "audio/*" in normalized_accept
+        or "*/*" in normalized_accept
+    ):
+        return "wav"
+
+    raise HTTPException(status_code=406, detail="不支持的音频格式")
+
+
+def _audio_response(wav: np.ndarray, sample_rate: int, audio_format: str) -> Response:
+    if audio_format == "ogg":
+        content = encode_ogg_opus(wav, sample_rate)
+        return Response(
+            content=content,
+            media_type="audio/ogg",
+            headers={"Content-Disposition": 'inline; filename="speech.ogg"'},
+        )
+
+    buffer = io.BytesIO()
+    sf.write(buffer, wav, sample_rate, format="WAV", subtype="PCM_16")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="audio/wav",
+        headers={"Content-Disposition": 'inline; filename="speech.wav"'},
+    )
+
+
 # ════════════════════════════════════════════════════════════════
 #  API 端点
 # ════════════════════════════════════════════════════════════════
@@ -279,18 +319,25 @@ def _run_inference(text: str, voice: str, speed: float):
     response_class=Response,
     responses={
         200: {
-            "content": {"audio/wav": {}},
-            "description": "PCM 16-bit WAV audio",
+            "content": {"audio/wav": {}, "audio/ogg": {}},
+            "description": "PCM 16-bit WAV audio or OGG/Opus audio",
         }
     },
 )
-async def tts_endpoint(request: TTSRequest):
+async def tts_endpoint(
+    request: TTSRequest,
+    http_request: Request = None,
+    format: Optional[str] = None,
+):
     """
     文本转语音。
 
     接收 JSON {"text": "...", "voice": "am_adam", "speed": 1.0}
     返回 WAV 音频流。
     """
+    accept = http_request.headers.get("accept") if http_request else None
+    audio_format = _select_audio_format(format, accept)
+
     text = request.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="文本不能为空")
@@ -326,23 +373,22 @@ async def tts_endpoint(request: TTSRequest):
         raise
     except asyncio.CancelledError:
         raise
+    except AudioEncodingError as e:
+        print(f"[ERROR] Audio encoding failed: {e}")
+        raise HTTPException(status_code=500, detail="语音生成失败")
     except Exception as e:
         print(f"[ERROR] Inference failed: {e}")
         raise HTTPException(status_code=500, detail="语音生成失败")
 
-    # 将 numpy 数组写入 WAV 格式的内存缓冲区
-    buffer = io.BytesIO()
-    sf.write(buffer, wav, sr, format="WAV", subtype="PCM_16")
+    try:
+        response = _audio_response(wav, sr, audio_format)
+    except AudioEncodingError as e:
+        print(f"[ERROR] Audio encoding failed: {e}")
+        raise HTTPException(status_code=500, detail="语音生成失败")
 
-    return Response(
-        content=buffer.getvalue(),
-        media_type="audio/wav",
-        headers={
-            "Content-Disposition": 'inline; filename="speech.wav"',
-            "X-Inference-Time": f"{elapsed:.2f}",
-            "X-Audio-Duration": f"{duration:.2f}",
-        },
-    )
+    response.headers["X-Inference-Time"] = f"{elapsed:.2f}"
+    response.headers["X-Audio-Duration"] = f"{duration:.2f}"
+    return response
 
 
 @app.get("/health")
