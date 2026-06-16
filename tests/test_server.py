@@ -31,6 +31,22 @@ class FakePipeline:
 
 
 class AudioCoreTests(unittest.TestCase):
+    def test_lifespan_validates_ffmpeg_before_loading_model(self):
+        from audio_encoding import AudioEncodingError
+
+        async def exercise():
+            with patch.object(
+                server,
+                "validate_ffmpeg",
+                create=True,
+                side_effect=AudioEncodingError("FFmpeg is unavailable"),
+            ):
+                async with server.lifespan(server.app):
+                    pass
+
+        with self.assertRaises(AudioEncodingError):
+            asyncio.run(exercise())
+
     def test_server_module_can_import_without_torch(self):
         script = """
 import builtins
@@ -86,14 +102,17 @@ class ApiTests(unittest.TestCase):
         self.print_patcher.start()
         self.original_pipeline = server.pipeline
         self.original_british_pipeline = server.british_pipeline
+        self.original_inference_lock = server.inference_lock
         server.pipeline = FakePipeline()
         server.british_pipeline = FakePipeline()
+        server.inference_lock = asyncio.Lock()
         server.actual_device = "cpu"
         self.client = TestClient(server.app)
 
     def tearDown(self):
         server.pipeline = self.original_pipeline
         server.british_pipeline = self.original_british_pipeline
+        server.inference_lock = self.original_inference_lock
         self.print_patcher.stop()
 
     def test_tts_returns_wav_and_uses_requested_settings(self):

@@ -14,6 +14,7 @@ import io
 import math
 import os
 import sys
+import threading
 import time
 import warnings
 from typing import Optional
@@ -32,9 +33,14 @@ except ImportError:
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from audio_encoding import AudioEncodingError, encode_ogg_opus
+from audio_encoding import (
+    AudioEncodingError,
+    WebMOpusEncoder,
+    encode_ogg_opus,
+    validate_ffmpeg,
+)
 from tts_catalog import (
     AVAILABLE_VOICES,
     CATALOG as TTS_CATALOG,
@@ -63,6 +69,7 @@ SEGMENT_SILENCE_MS = int(os.environ.get("KOKORO_SEGMENT_SILENCE_MS", "0"))
 FADE_MS = int(os.environ.get("KOKORO_FADE_MS", "0"))
 WARMUP_ENABLED = os.environ.get("KOKORO_WARMUP", "1") != "0"
 SUPPORTED_AUDIO_FORMATS = {"wav", "ogg"}
+STREAM_CHUNK_BYTES = 16384
 
 if VOICE not in AVAILABLE_VOICES:
     raise ValueError(f"Unsupported KOKORO_VOICE: {VOICE}")
@@ -100,6 +107,7 @@ async def lifespan(app: FastAPI):
     if torch is None:
         raise RuntimeError("PyTorch is required to start the TTS model")
 
+    validate_ffmpeg()
     actual_device = resolve_device(DEVICE)
 
     print()
@@ -256,9 +264,7 @@ def _combine_audio_segments(
 
 def _run_inference(text: str, voice: str, speed: float):
     """同步执行 Kokoro TTS 推理（在线程池中运行）。"""
-    selected_pipeline = (
-        british_pipeline if VOICE_LANG_CODES[voice] == "b" else pipeline
-    )
+    selected_pipeline = _select_pipeline_for_voice(voice)
     if selected_pipeline is None:
         raise RuntimeError("模型尚未就绪")
 
@@ -270,6 +276,10 @@ def _run_inference(text: str, voice: str, speed: float):
             audio_segments.append(audio.numpy() if hasattr(audio, 'numpy') else audio)
 
     return _combine_audio_segments(audio_segments), SAMPLE_RATE
+
+
+def _select_pipeline_for_voice(voice: str):
+    return british_pipeline if VOICE_LANG_CODES[voice] == "b" else pipeline
 
 
 def _select_audio_format(format_query: Optional[str], accept: Optional[str]) -> str:
@@ -308,6 +318,198 @@ def _audio_response(wav: np.ndarray, sample_rate: int, audio_format: str) -> Res
         media_type="audio/wav",
         headers={"Content-Disposition": 'inline; filename="speech.wav"'},
     )
+
+
+def _stream_segment_with_fade(
+    segment: np.ndarray,
+    sample_rate: int,
+    fade_ms: int,
+    fade_in: bool,
+    fade_out: bool,
+) -> np.ndarray:
+    result = np.asarray(segment, dtype=np.float32).reshape(-1).copy()
+    fade_samples = min(len(result) // 2, int(sample_rate * fade_ms / 1000))
+    if fade_samples <= 0:
+        return result
+    if fade_in:
+        result[:fade_samples] *= np.linspace(
+            0.0, 1.0, fade_samples, dtype=np.float32
+        )
+    if fade_out:
+        result[-fade_samples:] *= np.linspace(
+            1.0, 0.0, fade_samples, dtype=np.float32
+        )
+    return result
+
+
+class TTSStreamSession:
+    def __init__(
+        self,
+        pipeline,
+        text: str,
+        voice: str,
+        speed: float,
+        encoder_factory=WebMOpusEncoder,
+        sample_rate: int = SAMPLE_RATE,
+        silence_ms: int = SEGMENT_SILENCE_MS,
+        fade_ms: int = FADE_MS,
+    ):
+        self.pipeline = pipeline
+        self.text = text
+        self.voice = voice
+        self.speed = speed
+        self.encoder_factory = encoder_factory
+        self.sample_rate = sample_rate
+        self.silence_ms = silence_ms
+        self.fade_ms = fade_ms
+        self.cancel_event = threading.Event()
+        self.close_lock = threading.Lock()
+        self.closed = False
+        self.encoder = None
+        self.producer_thread = None
+        self.producer_error = None
+
+    def start(self) -> None:
+        self.encoder = self.encoder_factory(self.sample_rate)
+        self.producer_thread = threading.Thread(
+            target=self._produce,
+            name="kokoro-stream-producer",
+            daemon=True,
+        )
+        self.producer_thread.start()
+
+    def read_first_chunk(self) -> bytes:
+        chunk = self.read_chunk()
+        if not chunk or not chunk.startswith(b"\x1aE\xdf\xa3"):
+            if self.producer_error is not None:
+                raise AudioEncodingError("WebM encoding failed") from self.producer_error
+            raise AudioEncodingError("WebM encoding failed")
+        return chunk
+
+    def read_chunk(self) -> bytes:
+        if self.encoder is None:
+            raise AudioEncodingError("WebM encoding failed")
+        chunk = self.encoder.read(STREAM_CHUNK_BYTES)
+        if not chunk and self.producer_error is not None:
+            self._raise_producer_error_or_encoding_error()
+        return chunk
+
+    def iter_chunks(self, first_chunk: bytes):
+        try:
+            yield first_chunk
+            while True:
+                chunk = self.read_chunk()
+                if not chunk:
+                    break
+                yield chunk
+            self.finish()
+        finally:
+            self.close()
+
+    def finish(self) -> None:
+        if self.producer_thread is not None:
+            self.producer_thread.join()
+        if self.producer_error is not None:
+            raise AudioEncodingError("WebM encoding failed") from self.producer_error
+        if self.encoder is not None:
+            self.encoder.wait()
+
+    def close(self) -> None:
+        with self.close_lock:
+            if self.closed:
+                return
+            self.closed = True
+            self.cancel_event.set()
+            if self.encoder is not None:
+                self.encoder.close()
+        if (
+            self.producer_thread is not None
+            and self.producer_thread is not threading.current_thread()
+        ):
+            self.producer_thread.join(timeout=5)
+
+    def _produce(self) -> None:
+        try:
+            previous = None
+            wrote_segment = False
+            first_segment = True
+            silence = self._silence()
+            needs_lookahead = self.fade_ms > 0 or (
+                silence is not None and silence.size > 0
+            )
+            for _, _, audio in self.pipeline(
+                self.text, voice=self.voice, speed=self.speed
+            ):
+                if self.cancel_event.is_set():
+                    break
+                if audio is None:
+                    continue
+                segment = audio.numpy() if hasattr(audio, "numpy") else audio
+                segment = np.asarray(segment, dtype=np.float32).reshape(-1)
+                if segment.size == 0:
+                    continue
+
+                if needs_lookahead:
+                    if previous is None:
+                        previous = segment
+                        continue
+                    self._write_segment(previous, first_segment, False)
+                    wrote_segment = True
+                    first_segment = False
+                    self._write_silence(silence)
+                    previous = segment
+                else:
+                    self._write_segment(segment, first_segment, False)
+                    wrote_segment = True
+                    first_segment = False
+                    self._write_silence(silence)
+
+            if previous is not None and not self.cancel_event.is_set():
+                self._write_segment(previous, first_segment, True)
+                wrote_segment = True
+
+            if not wrote_segment and not self.cancel_event.is_set():
+                raise RuntimeError("模型未生成任何音频")
+        except Exception as error:
+            self.producer_error = error
+        finally:
+            if self.encoder is not None:
+                try:
+                    self.encoder.close_input()
+                except Exception as error:
+                    if self.producer_error is None:
+                        self.producer_error = error
+
+    def _write_segment(self, segment, fade_in: bool, fade_out: bool) -> None:
+        if self.encoder is None or self.cancel_event.is_set():
+            return
+        if self.fade_ms > 0:
+            segment = _stream_segment_with_fade(
+                segment, self.sample_rate, self.fade_ms, fade_in, fade_out
+            )
+        self.encoder.write(segment)
+
+    def _write_silence(self, silence: Optional[np.ndarray]) -> None:
+        if (
+            self.encoder is not None
+            and silence is not None
+            and silence.size
+            and not self.cancel_event.is_set()
+        ):
+            self.encoder.write(silence)
+
+    def _silence(self):
+        silence_samples = max(0, int(self.sample_rate * self.silence_ms / 1000))
+        if silence_samples <= 0:
+            return None
+        return np.zeros(silence_samples, dtype=np.float32)
+
+    def _raise_producer_error_or_encoding_error(self) -> None:
+        if self.producer_error is not None:
+            raise AudioEncodingError("WebM encoding failed") from self.producer_error
+        if self.producer_thread is not None and self.producer_thread.is_alive():
+            return
+        raise AudioEncodingError("WebM encoding failed")
 
 
 # ════════════════════════════════════════════════════════════════
@@ -389,6 +591,94 @@ async def tts_endpoint(
     response.headers["X-Inference-Time"] = f"{elapsed:.2f}"
     response.headers["X-Audio-Duration"] = f"{duration:.2f}"
     return response
+
+
+@app.post(
+    "/tts/stream",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "content": {'audio/webm; codecs="opus"': {}},
+            "description": "Streaming WebM/Opus audio",
+        }
+    },
+)
+async def tts_stream_endpoint(
+    request: TTSRequest,
+    format: Optional[str] = None,
+):
+    """流式文本转语音，返回 MediaSource 兼容的 WebM/Opus。"""
+    if format is not None:
+        raise HTTPException(status_code=406, detail="不支持的音频格式")
+
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="文本不能为空")
+
+    voice = request.voice or VOICE
+    speed = request.speed if request.speed is not None else DEFAULT_SPEED
+    selected_pipeline = _select_pipeline_for_voice(voice)
+    if selected_pipeline is None:
+        raise HTTPException(status_code=500, detail="语音生成失败")
+
+    lock_acquired = False
+    session = None
+    try:
+        try:
+            await asyncio.wait_for(inference_lock.acquire(), timeout=0.05)
+            lock_acquired = True
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=429, detail="服务器正忙，请稍后重试")
+
+        session = TTSStreamSession(
+            pipeline=selected_pipeline,
+            text=text,
+            voice=voice,
+            speed=speed,
+            encoder_factory=WebMOpusEncoder,
+        )
+        session.start()
+        first_chunk = await asyncio.to_thread(session.read_first_chunk)
+    except HTTPException:
+        if session is not None:
+            await asyncio.to_thread(session.close)
+        if lock_acquired:
+            inference_lock.release()
+        raise
+    except Exception as error:
+        print(f"[ERROR] Stream setup failed: {error}")
+        if session is not None:
+            await asyncio.to_thread(session.close)
+        if lock_acquired:
+            inference_lock.release()
+        raise HTTPException(status_code=500, detail="语音生成失败")
+
+    async def stream_body():
+        nonlocal lock_acquired
+        try:
+            yield first_chunk
+            while True:
+                chunk = await asyncio.to_thread(session.read_chunk)
+                if not chunk:
+                    break
+                yield chunk
+            await asyncio.to_thread(session.finish)
+        except AudioEncodingError as error:
+            print(f"[ERROR] Stream encoding failed: {error}")
+        finally:
+            await asyncio.to_thread(session.close)
+            if lock_acquired:
+                inference_lock.release()
+                lock_acquired = False
+
+    return StreamingResponse(
+        stream_body(),
+        media_type='audio/webm; codecs="opus"',
+        headers={
+            "Cache-Control": "no-store",
+            "X-Audio-Format": "webm-opus",
+        },
+    )
 
 
 @app.get("/health")
