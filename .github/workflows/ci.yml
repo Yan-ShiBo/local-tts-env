@@ -29,10 +29,13 @@ jobs:
         run: python scripts/sync_catalog.py --check
 
       - name: Python syntax
-        run: python -m py_compile server.py tray_app.py "Kokoro TTS.pyw" tts_catalog.py windows_runtime.py
+        run: python -m py_compile server.py audio_encoding.py tray_app.py "Kokoro TTS.pyw" tts_catalog.py windows_runtime.py windows_startup.py
+
+      - name: Bundled FFmpeg check
+        run: python -c "from audio_encoding import validate_ffmpeg; validate_ffmpeg()"
 
       - name: Python tests
-        run: python -m unittest discover -s tests -p "test_*.py" -v
+        run: python -m pytest tests -v
 
       - name: JavaScript syntax and tests
         run: |

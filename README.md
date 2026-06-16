@@ -13,9 +13,12 @@
 ## ✨ Features
 
 - **Instant read-aloud** — Select text on any webpage → click the floating button → hear natural English speech
+- **Streaming playback** — Chrome uses `/tts/stream` with MediaSource + WebM/Opus for long text, while older browsers fall back to OGG/Opus
+- **Small audio payloads** — `/tts` can return OGG/Opus with `Accept: audio/ogg` or `?format=ogg`; WAV remains the default for compatibility
 - **17 voices** — American male/female + British female, easily switchable
-- **System tray app** — Runs silently in the background, right-click to control
+- **System tray app** — Runs silently in the background, right-click to control, with optional login auto-start
 - **Browser settings panel** — Change voice & speed from a floating gear icon
+- **Playback progress** — Floating button shows a horizontal progress fill; streaming mode shows played seconds until final duration is known
 - **GPU-accelerated** — Near real-time inference on NVIDIA GPUs
 - **Fully offline** — No internet required after initial model download (~200MB)
 
@@ -95,7 +98,9 @@ browser script and built-in test page are generated from this catalog.
 | File | Description |
 |------|-------------|
 | `server.py` | FastAPI server with Kokoro TTS inference |
+| `audio_encoding.py` | Bundled FFmpeg helpers for OGG/Opus and WebM/Opus |
 | `tray_app.py` | System tray application (background mode) |
+| `windows_startup.py` | Windows Startup shortcut management for tray auto-start |
 | `Kokoro TTS.pyw` | No-console launcher for tray app |
 | `tts-userscript.js` | Tampermonkey script with settings panel |
 | `setup.bat` | One-click environment setup |
@@ -114,7 +119,15 @@ browser script and built-in test page are generated from this catalog.
 { "text": "Hello, how are you?", "voice": "af_bella", "speed": 0.8 }
 ```
 
-Returns `audio/wav` stream.
+Returns `audio/wav` by default. Use `Accept: audio/ogg` or `?format=ogg` for OGG/Opus.
+
+### `POST /tts/stream`
+
+```json
+{ "text": "Long text can start playing before generation finishes.", "voice": "af_bella", "speed": 0.8 }
+```
+
+Returns `audio/webm; codecs="opus"` as a continuous stream for MediaSource playback.
 
 ### `GET /health` — Server status
 ### `GET /voices` — Available voices
@@ -123,9 +136,10 @@ Returns `audio/wav` stream.
 ## ✅ Tests
 
 ```powershell
-conda run -n kokoro-tts python -m unittest discover -s tests -v
+conda run -n kokoro-tts python -m pytest tests -v
 node --test tests/userscript-core.test.cjs
 python scripts/sync_catalog.py --check
+python -c "from audio_encoding import validate_ffmpeg; validate_ffmpeg()"
 ```
 
 The default suite uses a fake pipeline and does not load Kokoro or CUDA.

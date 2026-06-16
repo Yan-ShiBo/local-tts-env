@@ -181,7 +181,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Kokoro TTS 本地服务",
     description="本地运行的高质量英文 TTS 服务（Kokoro 82M）",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -786,6 +786,14 @@ async def test_page():
   textarea:focus, select:focus { border-color: #667eea; }
   .row { display: flex; gap: 12px; }
   .row > * { flex: 1; }
+  .option-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #bbb;
+    margin-top: 16px;
+  }
+  .option-line input { width: auto; }
   .btn {
     display: inline-flex;
     align-items: center;
@@ -839,16 +847,129 @@ async def test_page():
     </div>
   </div>
 
+  <label class="option-line">
+    <input type="checkbox" id="streamMode" checked>
+    Stream mode (WebM/Opus)
+  </label>
+
   <button class="btn" id="speakBtn" onclick="speak()">🔊 朗读</button>
   <div class="status" id="status"></div>
   <audio id="player" controls style="display:none"></audio>
 </div>
 <script>
+const WEBM_OPUS_MIME = 'audio/webm; codecs="opus"';
+
+function canUseStreamMode() {
+  return !!(
+    window.MediaSource &&
+    MediaSource.isTypeSupported(WEBM_OPUS_MIME) &&
+    window.fetch &&
+    window.ReadableStream
+  );
+}
+
+function waitForSourceOpen(mediaSource) {
+  return new Promise((resolve, reject) => {
+    function cleanup() {
+      mediaSource.removeEventListener('sourceopen', onOpen);
+      mediaSource.removeEventListener('sourceclose', onClose);
+    }
+    function onOpen() { cleanup(); resolve(); }
+    function onClose() { cleanup(); reject(new Error('MediaSource closed before opening.')); }
+    mediaSource.addEventListener('sourceopen', onOpen);
+    mediaSource.addEventListener('sourceclose', onClose);
+  });
+}
+
+function appendBuffer(sourceBuffer, data) {
+  return new Promise((resolve, reject) => {
+    function cleanup() {
+      sourceBuffer.removeEventListener('updateend', onEnd);
+      sourceBuffer.removeEventListener('error', onError);
+    }
+    function onEnd() { cleanup(); resolve(); }
+    function onError() { cleanup(); reject(new Error('SourceBuffer append failed.')); }
+    sourceBuffer.addEventListener('updateend', onEnd);
+    sourceBuffer.addEventListener('error', onError);
+    try {
+      sourceBuffer.appendBuffer(data);
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
+  });
+}
+
+async function playStream(payload, player, status) {
+  const mediaSource = new MediaSource();
+  const sourceOpen = waitForSourceOpen(mediaSource);
+  const url = URL.createObjectURL(mediaSource);
+  player.src = url;
+  player.style.display = 'block';
+  player.onended = () => URL.revokeObjectURL(url);
+
+  await sourceOpen;
+  const sourceBuffer = mediaSource.addSourceBuffer(WEBM_OPUS_MIME);
+  const playPromise = player.play();
+  playPromise.catch(() => {});
+
+  const resp = await fetch('/tts/stream', {
+    method: 'POST',
+    headers: {
+      'Accept': WEBM_OPUS_MIME,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail || resp.statusText); }
+  if (!resp.body || !resp.body.getReader) {
+    throw new Error('Browser does not expose a streaming response body.');
+  }
+
+  const reader = resp.body.getReader();
+  let chunks = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (value && value.byteLength) {
+      chunks += 1;
+      await appendBuffer(sourceBuffer, value);
+      status.textContent = `Streaming WebM/Opus... chunks: ${chunks}, played: ${player.currentTime.toFixed(1)}s`;
+    }
+  }
+  if (mediaSource.readyState === 'open') mediaSource.endOfStream();
+  return { mode: 'stream', chunks };
+}
+
+async function playOgg(payload, player) {
+  const resp = await fetch('/tts?format=ogg', {
+    method: 'POST',
+    headers: {
+      'Accept': 'audio/ogg',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail || resp.statusText); }
+  const blob = await resp.blob();
+  const url = URL.createObjectURL(blob);
+  player.src = url;
+  player.style.display = 'block';
+  player.onended = () => URL.revokeObjectURL(url);
+  player.play();
+  return {
+    mode: 'ogg',
+    inferTime: resp.headers.get('X-Inference-Time') || '?',
+    audioDur: resp.headers.get('X-Audio-Duration') || '?',
+  };
+}
+
 async function speak() {
   const text = document.getElementById('text').value.trim();
   if (!text) return;
   const voice = document.getElementById('voice').value;
   const speed = parseFloat(document.getElementById('speed').value);
+  const streamMode = document.getElementById('streamMode').checked;
   const btn = document.getElementById('speakBtn');
   const status = document.getElementById('status');
   const player = document.getElementById('player');
@@ -859,22 +980,21 @@ async function speak() {
   player.style.display = 'none';
   try {
     const t0 = performance.now();
-    const resp = await fetch('/tts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, voice, speed }),
-    });
-    if (!resp.ok) { const e = await resp.json(); throw new Error(e.detail || resp.statusText); }
-    const blob = await resp.blob();
+    const payload = { text, voice, speed };
+    const useStream = streamMode && canUseStreamMode();
+    if (streamMode && !useStream) {
+      status.textContent = 'MediaSource WebM/Opus unavailable; falling back to OGG/Opus...';
+    }
+    const result = useStream
+      ? await playStream(payload, player, status)
+      : await playOgg(payload, player);
     const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
-    const inferTime = resp.headers.get('X-Inference-Time') || '?';
-    const audioDur = resp.headers.get('X-Audio-Duration') || '?';
-    const url = URL.createObjectURL(blob);
-    player.src = url;
-    player.style.display = 'block';
-    player.play();
     status.className = 'status show success';
-    status.textContent = `✅ 完成！推理 ${inferTime}s → 音频 ${audioDur}s（总耗时 ${elapsed}s）`;
+    if (result.mode === 'stream') {
+      status.textContent = `✅ Streaming ready: ${result.chunks} chunks received（setup ${elapsed}s）`;
+    } else {
+      status.textContent = `✅ 完成！推理 ${result.inferTime}s → 音频 ${result.audioDur}s（总耗时 ${elapsed}s）`;
+    }
   } catch (e) {
     status.className = 'status show error';
     status.textContent = '❌ 错误：' + e.message;

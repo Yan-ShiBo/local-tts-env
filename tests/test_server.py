@@ -273,6 +273,14 @@ class ApiTests(unittest.TestCase):
         self.assertIn("audio/ogg", content)
         self.assertNotIn("application/json", content)
 
+    def test_test_page_exposes_streaming_mode(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="streamMode"', response.text)
+        self.assertIn("/tts/stream", response.text)
+        self.assertIn("MediaSource", response.text)
+
     def test_cors_does_not_allow_arbitrary_websites(self):
         response = self.client.get(
             "/health",
