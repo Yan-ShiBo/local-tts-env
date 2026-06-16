@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kokoro TTS 划词朗读
 // @namespace    https://github.com/Yan-ShiBo/local-tts-env
-// @version      1.4.1
+// @version      1.4.2
 // @description  选中英文文本，一键使用本地 Kokoro TTS 进行高质量朗读
 // @author       Yan-ShiBo
 // @match        *://*/*
@@ -18,6 +18,9 @@
 
 const KokoroTTSCore = (() => {
   const WEBM_OPUS_MIME = 'audio/webm; codecs="opus"';
+  const OGG_OPUS_MIME = 'audio/ogg; codecs="opus"';
+  const OGG_MIME = "audio/ogg";
+  const WAV_MIME = "audio/wav";
 
   function createRequestGate() {
     let generation = 0;
@@ -104,6 +107,49 @@ const KokoroTTSCore = (() => {
     const rawPercent = ((Number(currentTime) || 0) / duration) * 100;
     const percent = Math.max(0, Math.min(100, Math.round(rawPercent)));
     return { determinate: true, label: `${percent}%`, percent };
+  }
+
+  function canPlayAudioType(audioProbe, mime) {
+    if (!audioProbe || typeof audioProbe.canPlayType !== "function") {
+      return false;
+    }
+    try {
+      const result = audioProbe.canPlayType(mime);
+      return result === "probably" || result === "maybe";
+    } catch {
+      return false;
+    }
+  }
+
+  function selectBlobAudioFormat(audioProbe) {
+    if (
+      canPlayAudioType(audioProbe, OGG_OPUS_MIME) ||
+      canPlayAudioType(audioProbe, OGG_MIME)
+    ) {
+      return { format: "ogg", accept: OGG_MIME, mime: OGG_MIME };
+    }
+    return { format: "wav", accept: WAV_MIME, mime: WAV_MIME };
+  }
+
+  function normalizeAudioBlob(payload, mime) {
+    if (typeof Blob === "undefined") return payload;
+    if (
+      payload instanceof Blob ||
+      (payload && typeof payload.slice === "function" && typeof payload.size === "number")
+    ) {
+      if (payload.type === mime) return payload;
+      return payload.slice(0, payload.size, mime);
+    }
+    return new Blob([payload], { type: mime });
+  }
+
+  function isUnsupportedMediaError(error) {
+    const name = error && error.name ? String(error.name) : "";
+    const message = error && error.message ? String(error.message) : "";
+    return (
+      name === "NotSupportedError" ||
+      /not supported|no supported source|failed to load/i.test(message)
+    );
   }
 
   function createAppendQueue(sourceBuffer, mediaSource) {
@@ -229,7 +275,10 @@ const KokoroTTSCore = (() => {
     createAppendQueue,
     createRequestGate,
     formatPlaybackProgress,
+    isUnsupportedMediaError,
+    normalizeAudioBlob,
     releaseAudio,
+    selectBlobAudioFormat,
     supportsWebMOpus,
   };
 })();
@@ -250,7 +299,6 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   const API_ORIGIN = new URL(API_BASE).origin;
   const API_URL = API_BASE + "/tts";
   const API_STREAM_URL = API_BASE + "/tts/stream";
-  const API_OGG_URL = API_URL + "?format=ogg";
   const SHORTCUT = { ctrl: true, shift: true, key: "S" }; // Ctrl+Shift+S
 
   /* CATALOG:START */
@@ -915,13 +963,13 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     return updateProgress;
   }
 
-  async function fetchOggBlob(text, generation) {
+  async function fetchAudioBlob(text, generation, audioFormat) {
     return new Promise((resolve, reject) => {
       const request = GM_xmlhttpRequest({
         method: "POST",
-        url: API_OGG_URL,
+        url: `${API_URL}?format=${audioFormat.format}`,
         headers: {
-          "Accept": "audio/ogg",
+          "Accept": audioFormat.accept,
           "Content-Type": "application/json",
         },
         data: JSON.stringify({
@@ -934,7 +982,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
         onload: (response) => {
           if (!requestGate.isCurrent(generation)) return;
           if (response.status >= 200 && response.status < 300) {
-            resolve(response.response);
+            resolve(KokoroTTSCore.normalizeAudioBlob(response.response, audioFormat.mime));
           } else {
             reject(
               new Error(
@@ -961,13 +1009,20 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     });
   }
 
-  async function playBlobAudio(text, generation, btnElement, buttonContainer) {
-    const audioBlob = await fetchOggBlob(text, generation);
+  async function playBlobAudioFormat(
+    text,
+    generation,
+    btnElement,
+    buttonContainer,
+    audioFormat
+  ) {
+    const audioBlob = await fetchAudioBlob(text, generation, audioFormat);
     if (!requestGate.isCurrent(generation)) return;
 
     const blobUrl = URL.createObjectURL(audioBlob);
     const audio = new Audio(blobUrl);
     audio._blobUrl = blobUrl;
+    audio._suppressPlaybackErrorUi = true;
     currentAudio = audio;
 
     const updateProgress = attachPlaybackUi(
@@ -979,6 +1034,37 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     updateProgress();
 
     await audio.play();
+    audio._suppressPlaybackErrorUi = false;
+  }
+
+  async function playBlobAudio(text, generation, btnElement, buttonContainer) {
+    const preferredFormat = KokoroTTSCore.selectBlobAudioFormat(new Audio());
+    try {
+      await playBlobAudioFormat(
+        text,
+        generation,
+        btnElement,
+        buttonContainer,
+        preferredFormat
+      );
+    } catch (error) {
+      if (
+        preferredFormat.format !== "ogg" ||
+        !KokoroTTSCore.isUnsupportedMediaError(error) ||
+        !requestGate.isCurrent(generation)
+      ) {
+        throw error;
+      }
+      console.warn("[Kokoro TTS] OGG playback failed; falling back to WAV", error);
+      stopAudio();
+      await playBlobAudioFormat(
+        text,
+        generation,
+        btnElement,
+        buttonContainer,
+        { format: "wav", accept: "audio/wav", mime: "audio/wav" }
+      );
+    }
   }
 
   function waitForSourceOpen(mediaSource) {

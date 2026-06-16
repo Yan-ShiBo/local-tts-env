@@ -12,6 +12,8 @@ test("userscript core can be imported without browser globals", () => {
   assert.equal(typeof core.supportsWebMOpus, "function");
   assert.equal(typeof core.formatPlaybackProgress, "function");
   assert.equal(typeof core.createAppendQueue, "function");
+  assert.equal(typeof core.selectBlobAudioFormat, "function");
+  assert.equal(typeof core.normalizeAudioBlob, "function");
 });
 
 
@@ -187,4 +189,33 @@ test("append queue preserves source buffer order and ends after pending updates"
 
   assert.deepEqual(appended, ["first", "second"]);
   assert.equal(mediaSource.endCalls, 1);
+});
+
+
+test("blob playback prefers ogg only when the browser reports support", () => {
+  const { selectBlobAudioFormat } = require("../tts-userscript.js");
+
+  assert.deepEqual(
+    selectBlobAudioFormat({ canPlayType: (mime) => mime.includes("opus") ? "probably" : "" }),
+    { format: "ogg", accept: "audio/ogg", mime: "audio/ogg" }
+  );
+  assert.deepEqual(
+    selectBlobAudioFormat({ canPlayType: () => "" }),
+    { format: "wav", accept: "audio/wav", mime: "audio/wav" }
+  );
+  assert.deepEqual(
+    selectBlobAudioFormat(null),
+    { format: "wav", accept: "audio/wav", mime: "audio/wav" }
+  );
+});
+
+
+test("audio blob normalization preserves bytes and assigns playable mime type", async () => {
+  const { normalizeAudioBlob } = require("../tts-userscript.js");
+  const original = new Blob([Buffer.from("OggS")], { type: "" });
+
+  const normalized = normalizeAudioBlob(original, "audio/ogg");
+
+  assert.equal(normalized.type, "audio/ogg");
+  assert.equal(Buffer.from(await normalized.arrayBuffer()).toString("utf8"), "OggS");
 });
