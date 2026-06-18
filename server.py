@@ -562,10 +562,143 @@ def _restore_formulas(text: str, formulas: list[tuple[str, str]]) -> str:
     return result
 
 
-def _call_ollama_translate(text: str, model: str, target_language: str) -> str:
-    # 1. 提取并保护公式，用 __MATH_N__ 占位符替代
-    protected_text, formulas = _protect_formulas(text)
+def _clean_formula_verbalization_zh(value: str) -> str:
+    cleaned = _clean_translation_response(value)
+    cleaned = cleaned.strip("。，. \t\r\n-*")
+    return cleaned or "公式"
 
+
+def _parse_formula_verbalizations_zh(raw: str, expected_count: int) -> list[str]:
+    cleaned = _clean_translation_response(raw)
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            parsed = parsed.get("verbalizations") or parsed.get("formulas")
+        if isinstance(parsed, list):
+            values = [_clean_formula_verbalization_zh(str(item)) for item in parsed]
+            if len(values) >= expected_count:
+                return values[:expected_count]
+    except json.JSONDecodeError:
+        pass
+
+    lines = []
+    for line in cleaned.splitlines():
+        line_s = line.strip()
+        if not line_s:
+            continue
+        line_s = re.sub(r'^(?:\d+\.|[-*])\s*', '', line_s)
+        cleaned_val = _clean_formula_verbalization_zh(line_s)
+        if cleaned_val:
+            lines.append(cleaned_val)
+            
+    if len(lines) >= expected_count:
+        return lines[:expected_count]
+    return lines + ["公式"] * (expected_count - len(lines))
+
+
+def _call_ollama_formula_verbalization_zh_single(
+    formula: str,
+    model: str,
+    context: Optional[str] = None,
+) -> str:
+    cf = formula.strip()
+    if cf.startswith("[[MATH:") and cf.endswith("]]"):
+        cf = cf[7:-2].strip()
+    elif cf.startswith("$$") and cf.endswith("$$"):
+        cf = cf[2:-2].strip()
+    elif cf.startswith("\\[") and cf.endswith("\\]"):
+        cf = cf[2:-2].strip()
+    elif cf.startswith("\\(") and cf.endswith("\\)"):
+        cf = cf[2:-2].strip()
+    elif cf.startswith("$") and cf.endswith("$"):
+        cf = cf[1:-1].strip()
+
+    context_block = (context or "").strip()
+    prompt = f"Formula: {cf}"
+    if context_block:
+        prompt = f"Context: {context_block[:4000]}\nFormula: {cf}"
+
+    payload = {
+        "model": model,
+        "stream": False,
+        "system": (
+            "You convert a mathematical formula into a concise spoken Simplified Chinese description (口语化中文描述). "
+            "Describe only what is written; never solve, simplify, calculate, or infer missing meanings. "
+            "Return ONLY the spoken description, with no reasoning, notes, markdown fences, symbols, or explanations. "
+            "Example: 'E = mc^2' -> 'E等于m乘以c the power of 2'. "
+            "Example: '\\frac{x}{y}' -> 'y分之x'. "
+            "Example: 'a \\le b' -> 'a小于等于b'."
+        ),
+        "prompt": prompt,
+        "options": {
+            "temperature": 0.1,
+            "top_p": 0.9,
+        },
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib_request.Request(
+        f"{OLLAMA_BASE_URL}/api/generate",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(req, timeout=OLLAMA_TRANSLATE_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib_error.HTTPError as error:
+        raise RuntimeError(f"Ollama returned HTTP {error.code}") from error
+    except urllib_error.URLError as error:
+        raise RuntimeError("Cannot connect to Ollama") from error
+    except TimeoutError as error:
+        raise RuntimeError("Ollama formula verbalization timed out") from error
+
+    try:
+        response_payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Ollama returned invalid JSON") from error
+
+    desc = _clean_formula_verbalization_zh(response_payload.get("response", ""))
+    return desc
+
+
+def _call_ollama_formula_verbalization_zh(
+    formulas: list[str],
+    model: str,
+    context: Optional[str] = None,
+) -> list[str]:
+    return [
+        _call_ollama_formula_verbalization_zh_single(f, model, context)
+        for f in formulas
+    ]
+
+
+def _restore_formulas_with_verbalizations(
+    text: str,
+    formulas: list[tuple[str, str]],
+    verbalizations_zh: list[str],
+) -> str:
+    result = text
+    for idx, (placeholder, original) in enumerate(formulas):
+        cleaned = original
+        if cleaned.startswith("[[MATH:") and cleaned.endswith("]]"):
+            content = cleaned[7:-2].strip()
+            cleaned = f"${content}$"
+            
+        desc = ""
+        if verbalizations_zh and idx < len(verbalizations_zh):
+            desc = verbalizations_zh[idx].strip()
+            
+        if desc and desc != "公式":
+            replacement = f"{cleaned} ({desc})"
+        else:
+            replacement = cleaned
+            
+        result = result.replace(placeholder, replacement)
+    return result
+
+
+def _call_ollama_translate_raw(protected_text: str, model: str, target_language: str) -> str:
     payload = {
         "model": model,
         "stream": False,
@@ -609,8 +742,6 @@ def _call_ollama_translate(text: str, model: str, target_language: str) -> str:
     if not translated:
         raise RuntimeError("Ollama returned an empty translation")
 
-    # 2. 还原公式，并将 [[MATH: ...]] 渲染为标准 $...$ 显示
-    translated = _restore_formulas(translated, formulas)
     return translated
 
 
@@ -1066,12 +1197,49 @@ async def translate_endpoint(request: TranslateRequest):
 
     try:
         t0 = time.perf_counter()
-        translated_text = await asyncio.to_thread(
-            _call_ollama_translate,
-            text,
-            model,
-            target_language,
-        )
+        # 1. 提取并保护公式，用 __MATH_N__ 占位符替代
+        protected_text, formulas = _protect_formulas(text)
+        
+        if formulas:
+            # 有公式，并发执行翻译与各公式中文口语化描述，最大化减少延迟
+            formula_texts = [f[1] for f in formulas]
+            translated_raw_task = asyncio.to_thread(
+                _call_ollama_translate_raw,
+                protected_text,
+                model,
+                target_language,
+            )
+            # 为每个公式各创建一个独立的并行任务
+            verbalize_tasks = [
+                asyncio.to_thread(
+                    _call_ollama_formula_verbalization_zh_single,
+                    form,
+                    model,
+                    text,
+                )
+                for form in formula_texts
+            ]
+            results = await asyncio.gather(
+                translated_raw_task,
+                *verbalize_tasks,
+            )
+            translated_raw = results[0]
+            verbalizations_zh = results[1:]
+            # 2. 还原公式，并将 [[MATH: ...]] 渲染为标准 $...$ 且附带中文描述
+            translated_text = _restore_formulas_with_verbalizations(
+                translated_raw,
+                formulas,
+                verbalizations_zh,
+            )
+        else:
+            # 无公式，常规翻译
+            translated_text = await asyncio.to_thread(
+                _call_ollama_translate_raw,
+                protected_text,
+                model,
+                target_language,
+            )
+            
         elapsed = time.perf_counter() - t0
         print(
             f"[TRANSLATE] {len(text)} chars -> {len(translated_text)} chars, "
