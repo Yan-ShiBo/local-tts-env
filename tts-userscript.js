@@ -1,10 +1,16 @@
 // ==UserScript==
-// @name         Kokoro TTS 划词朗读
+// @name         本地划词听译助手
+// @name:zh-CN   本地划词听译助手
+// @name:en      Local Selection Read & Translate
 // @namespace    https://github.com/Yan-ShiBo/local-tts-env
-// @version      1.6.0
-// @description  选中英文文本，一键使用本地 Kokoro TTS 进行高质量朗读
+// @version      1.7.0
+// @description  选中文本即可本地朗读或翻译：Kokoro TTS 负责语音朗读，Ollama 模型负责本地翻译，文本不上传云端。
+// @description:en Select text on any page to read aloud locally with Kokoro TTS or translate locally through Ollama.
 // @author       Yan-ShiBo
+// @license      MIT
 // @match        *://*/*
+// @homepageURL  https://github.com/Yan-ShiBo/local-tts-env
+// @supportURL   https://github.com/Yan-ShiBo/local-tts-env/issues
 // @downloadURL  https://raw.githubusercontent.com/Yan-ShiBo/local-tts-env/main/tts-userscript.js
 // @updateURL    https://raw.githubusercontent.com/Yan-ShiBo/local-tts-env/main/tts-userscript.js
 // @grant        GM_xmlhttpRequest
@@ -12,6 +18,9 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @connect      127.0.0.1
+// @compatible   chrome Requires Tampermonkey and the local API server.
+// @compatible   edge Requires Tampermonkey and the local API server.
+// @compatible   brave Requires Tampermonkey and the local API server.
 // @run-at       document-end
 // @noframes
 // ==/UserScript==
@@ -873,7 +882,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     }
 
     panel.innerHTML = `
-      <h3>Kokoro TTS Settings</h3>
+      <h3>Local Read & Translate</h3>
       <div class="tts-settings-grid">
         <div class="tts-settings-column">
           <h4>TTS</h4>
@@ -1166,8 +1175,8 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   const gearBtn = document.createElement("button");
   gearBtn.className = "tts-settings-gear";
   gearBtn.innerHTML = "\u2699\uFE0F";
-  gearBtn.title = "Kokoro TTS Settings";
-  gearBtn.setAttribute("aria-label", "Kokoro TTS settings");
+  gearBtn.title = "Local Read & Translate settings";
+  gearBtn.setAttribute("aria-label", "Local Read and Translate settings");
   gearBtn.setAttribute("aria-expanded", "false");
   gearBtn.addEventListener("click", (e) => {
     if (!e.isTrusted) return;
@@ -2062,7 +2071,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   });
 
   console.log(
-    "%c[Kokoro TTS] Script loaded. Select text to read, or press Ctrl+Shift+S",
+    "%c[Local Read & Translate] Script loaded. Select text to read or translate, or press Ctrl+Shift+S to read.",
     "color: #667eea; font-weight: bold;"
   );
 })();

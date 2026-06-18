@@ -1,0 +1,72 @@
+# Greasy Fork Additional Info
+
+Copy the Markdown below into Greasy Fork's "Additional info" field.
+
+Greasy Fork reads the project links from the userscript metadata:
+
+- `@homepageURL https://github.com/Yan-ShiBo/local-tts-env`
+- `@supportURL https://github.com/Yan-ShiBo/local-tts-env/issues`
+
+Keep the GitHub links in both places: metadata makes them appear in Greasy Fork's structured script links, while the text below makes them visible inside the script description.
+
+---
+
+## 本地划词听译助手
+
+选中网页上的文本后，可以直接：
+
+- `Read`：调用本机 Kokoro TTS 服务朗读
+- `Translate`：调用本机 Ollama 模型翻译
+- 在设置面板里切换声音、语速、翻译模型和目标语言
+- 查看本地 TTS 服务与 Ollama 模型状态
+
+## 重要：需要本地服务
+
+这个脚本不是单独安装就能工作的云端脚本。它只负责浏览器里的划词按钮和交互，需要你先在电脑上启动本地服务：
+
+1. 安装并启动本项目的本地 FastAPI 服务
+2. 朗读需要 Kokoro TTS 环境
+3. 翻译需要安装 Ollama，并拉取本地模型，例如：
+
+```powershell
+ollama pull translategemma:4b
+ollama pull qwen3:14b
+```
+
+推荐实时翻译优先使用 `translategemma:4b`，速度通常比 Qwen3 系列更适合划词场景。
+
+## 隐私说明
+
+脚本只请求本机地址：
+
+```text
+http://127.0.0.1:5000
+```
+
+选中文本不会被发送到外部云端服务。朗读和翻译都在你的电脑本地完成。
+
+## 常见问题
+
+### 安装后没有反应
+
+先确认本地服务已启动：
+
+```text
+http://127.0.0.1:5000/health
+```
+
+如果打不开，先运行项目里的 `start.bat` 或托盘启动器。
+
+### 翻译健康检测失败
+
+通常是浏览器脚本已更新，但本地后台服务还没重启到最新版。重启本地服务后再刷新网页。
+
+### 翻译第一次比较慢
+
+Ollama 第一次使用某个模型时需要把模型加载到 GPU/内存，之后同一模型会快很多。
+
+## 项目地址
+
+- GitHub: https://github.com/Yan-ShiBo/local-tts-env
+- 问题反馈: https://github.com/Yan-ShiBo/local-tts-env/issues
+- Raw userscript: https://raw.githubusercontent.com/Yan-ShiBo/local-tts-env/main/tts-userscript.js

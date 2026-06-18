@@ -1,18 +1,18 @@
-# 🎙️ Kokoro TTS - Local Text-to-Speech for Chrome
+# 本地划词听译助手 - Local Selection Read & Translate
 
-> Select any English text in Chrome, click to listen. Powered by [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M), running **100% locally** on your GPU.
+> Select text in Chrome, then read it aloud locally with [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) or translate it locally through Ollama. Your selected text stays on your machine.
 
 [![CI](https://github.com/Yan-ShiBo/local-tts-env/actions/workflows/ci.yml/badge.svg)](https://github.com/Yan-ShiBo/local-tts-env/actions/workflows/ci.yml)
 
 <p align="center">
-  <strong>Zero cloud dependency · Free & unlimited · Privacy-first</strong>
+  <strong>Local read-aloud · Local translation · Privacy-first</strong>
 </p>
 
 ---
 
 ## ✨ Features
 
-- **Instant read-aloud** — Select text on any webpage → click the floating button → hear natural English speech
+- **Selection read-aloud** — Select text on any webpage → click the floating button → hear natural English speech
 - **Streaming playback** — Chrome uses `/tts/stream` with MediaSource + WebM/Opus for long text, while older browsers fall back to OGG/Opus
 - **Small audio payloads** — `/tts` can return OGG/Opus with `Accept: audio/ogg` or `?format=ogg`; WAV remains the default for compatibility
 - **17 voices** — American male/female + British female, easily switchable
@@ -87,16 +87,26 @@ The default translation model is `qwen3:14b`. Override it with `OLLAMA_TRANSLATE
 ### 4. Install the Browser Script
 
 1. Install [Tampermonkey](https://chrome.google.com/webstore/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo) in Chrome
-2. Open the [raw userscript installer](https://raw.githubusercontent.com/Yan-ShiBo/local-tts-env/main/tts-userscript.js)
+2. Install the published script from Greasy Fork, or open the [GitHub raw userscript](https://raw.githubusercontent.com/Yan-ShiBo/local-tts-env/main/tts-userscript.js) for the development version
 3. Confirm installation in Tampermonkey
 
 ### 5. Use it!
 
-1. Open any English webpage
-2. **Select text** → a floating 🔊 button appears
-3. Click it → hear natural English speech!
+1. Open any webpage
+2. **Select text** → floating `Read` and `Translate` buttons appear
+3. Click `Read` for local TTS, or `Translate` for local Ollama translation
 
 > ⌨️ Shortcut: `Ctrl+Shift+S` to read selected text directly.
+
+## Greasy Fork Publishing
+
+The script metadata includes:
+
+- `@homepageURL`: GitHub project page, shown as the script homepage
+- `@supportURL`: GitHub Issues, shown as the feedback/support link
+- `@license`: MIT
+
+When publishing on Greasy Fork, paste the Markdown from [`docs/greasyfork-additional-info.md`](docs/greasyfork-additional-info.md) into the script's additional info field. The GitHub repository should be linked both through `@homepageURL` and in that additional info section.
 
 ## 🎭 Available Voices
 
@@ -113,7 +123,8 @@ browser script and built-in test page are generated from this catalog.
 | `tray_app.py` | System tray application (background mode) |
 | `windows_startup.py` | Windows Startup shortcut management for tray auto-start |
 | `Kokoro TTS.pyw` | No-console launcher for tray app |
-| `tts-userscript.js` | Tampermonkey script with settings panel |
+| `tts-userscript.js` | Tampermonkey script for local selection read-aloud and translation |
+| `docs/greasyfork-additional-info.md` | Markdown content for the Greasy Fork additional info field |
 | `setup.bat` | One-click environment setup |
 | `start.bat` | Terminal-mode server launcher |
 | `requirements.txt` | Python dependencies |
