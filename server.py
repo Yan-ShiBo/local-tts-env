@@ -221,7 +221,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Kokoro TTS 本地服务",
     description="本地运行的高质量英文 TTS 服务（Kokoro 82M）",
-    version="1.7.0",
+    version="1.7.1",
     lifespan=lifespan,
 )
 
@@ -584,33 +584,175 @@ def _unwrap_formula_for_translation(formula: str) -> str:
     return cleaned
 
 
+_FORMULA_SYMBOL_DISPLAY = {
+    r"\alpha": "α",
+    r"\beta": "β",
+    r"\gamma": "γ",
+    r"\delta": "δ",
+    r"\epsilon": "ε",
+    r"\varepsilon": "ε",
+    r"\lambda": "λ",
+    r"\mu": "μ",
+    r"\pi": "π",
+    r"\sigma": "σ",
+    r"\theta": "θ",
+    r"\Theta": "Θ",
+    r"\omega": "ω",
+    r"\Omega": "Ω",
+    r"\rightarrow": "→",
+    r"\to": "→",
+    r"\mapsto": "↦",
+    r"\Rightarrow": "⇒",
+    r"\le": "≤",
+    r"\ge": "≥",
+    r"\neq": "≠",
+    r"\ne": "≠",
+    r"\approx": "≈",
+    r"\times": "×",
+    r"\cdot": "·",
+    r"\in": "∈",
+    r"\sum": "∑",
+    r"\int": "∫",
+}
+
+
+_FORMULA_SYMBOL_ZH = {
+    "alpha": "alpha",
+    "beta": "beta",
+    "gamma": "gamma",
+    "delta": "delta",
+    "epsilon": "epsilon",
+    "lambda": "lambda",
+    "mu": "mu",
+    "pi": "pi",
+    "sigma": "sigma",
+    "theta": "theta",
+    "omega": "omega",
+    "α": "alpha",
+    "β": "beta",
+    "γ": "gamma",
+    "δ": "delta",
+    "ε": "epsilon",
+    "λ": "lambda",
+    "μ": "mu",
+    "π": "pi",
+    "σ": "sigma",
+    "θ": "theta",
+    "ω": "omega",
+}
+
+
+def _readable_formula_symbol(formula: str) -> str:
+    value = _unwrap_formula_for_translation(formula)
+    if not value:
+        return formula.strip()
+
+    value = re.sub(r"\\(?:left|right)\b", "", value)
+    value = value.replace("\\,", " ").replace("\\;", " ").replace("\\!", "")
+
+    value = re.sub(
+        r"\\hat\{?([A-Za-zΑ-Ωα-ω])\}?",
+        lambda match: f"{match.group(1)}\u0302",
+        value,
+    )
+    value = re.sub(
+        r"\\bar\{?([A-Za-zΑ-Ωα-ω])\}?",
+        lambda match: f"{match.group(1)}\u0304",
+        value,
+    )
+    value = re.sub(
+        r"\\tilde\{?([A-Za-zΑ-Ωα-ω])\}?",
+        lambda match: f"{match.group(1)}\u0303",
+        value,
+    )
+
+    for latex, symbol in _FORMULA_SYMBOL_DISPLAY.items():
+        value = value.replace(latex, symbol)
+
+    value = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"(\1)/(\2)", value)
+    value = re.sub(r"\\sqrt\{([^{}]+)\}", r"√(\1)", value)
+    value = value.replace(r"\{", "{").replace(r"\}", "}")
+    value = re.sub(r"\\([A-Za-z]+)", r"\1", value)
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"\s*([=,+*/(){}])\s*", r"\1", value)
+    value = re.sub(r"\s*(→|↦|⇒|≤|≥|≠|≈|∈)\s*", r" \1 ", value)
+    return value.strip()
+
+
 def _display_formula_for_translation(formula: str) -> str:
-    content = _unwrap_formula_for_translation(formula)
-    return f"${content}$" if content else formula.strip()
+    return _readable_formula_symbol(formula)
 
 
 def _normalize_formula_for_description(formula: str) -> str:
-    return (
+    value = (
         _unwrap_formula_for_translation(formula)
         .replace("\\rightarrow", "\\to")
         .replace("\\mapsto", "\\to")
         .replace("→", "\\to")
         .replace("⇒", "\\to")
+        .replace(r"\{", "{")
+        .replace(r"\}", "}")
         .replace("\\left", "")
         .replace("\\right", "")
         .strip()
     )
+    for latex, symbol in _FORMULA_SYMBOL_DISPLAY.items():
+        if latex.startswith("\\") and len(latex) > 2:
+            name = latex[1:]
+            if name in _FORMULA_SYMBOL_ZH:
+                value = value.replace(latex, name)
+    return value
+
+
+def _describe_formula_token_zh(token: str) -> str:
+    value = (token or "").strip().strip("{} ")
+    if value.startswith("\\"):
+        value = value[1:]
+    return _FORMULA_SYMBOL_ZH.get(value, value)
+
+
+def _split_top_level_commas(text: str) -> list[str]:
+    parts = []
+    depth = 0
+    start = 0
+    pairs = {"{": "}", "(": ")", "[": "]"}
+    closing = set(pairs.values())
+    for i, char in enumerate(text):
+        if char in pairs:
+            depth += 1
+        elif char in closing:
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            parts.append(text[start:i].strip())
+            start = i + 1
+    parts.append(text[start:].strip())
+    return [part for part in parts if part]
 
 
 def _describe_formula_atom_zh(expr: str) -> str:
-    value = (expr or "").strip().strip("{} ")
+    value = _normalize_formula_for_description(expr)
     if not value:
         return ""
+
+    if value.startswith("{") and value.endswith("}"):
+        inner = value[1:-1].strip()
+        inner_desc = _describe_formula_atom_zh(inner)
+        return f"由{inner_desc}组成的集合" if inner_desc else "集合"
+
+    if value.startswith("(") and value.endswith(")"):
+        inner = value[1:-1].strip()
+        parts = _split_top_level_commas(inner)
+        if len(parts) >= 2:
+            names = {2: "二元组", 3: "三元组", 4: "四元组"}
+            tuple_name = names.get(len(parts), f"{len(parts)}元组")
+            return f"{tuple_name}（{'、'.join(_describe_formula_atom_zh(part) for part in parts)}）"
+
+    value = value.strip().strip("{} ")
 
     hat_match = re.fullmatch(r"\\hat\{?([A-Za-z][A-Za-z0-9]*)\}?(?:\((.+)\))?", value)
     if hat_match:
         base, arg = hat_match.groups()
-        desc = f"{base}的估计值"
+        desc = f"{_describe_formula_token_zh(base)}的估计值"
         if arg:
             desc += f"关于{_describe_formula_atom_zh(arg)}的函数"
         return desc
@@ -618,30 +760,35 @@ def _describe_formula_atom_zh(expr: str) -> str:
     sub_func = re.fullmatch(r"([A-Za-z][A-Za-z0-9]*)_\{?([^{}()\s]+)\}?\((.+)\)", value)
     if sub_func:
         base, sub, arg = sub_func.groups()
-        return f"{base}的下角标{sub}关于{_describe_formula_atom_zh(arg)}的函数"
+        return (
+            f"{_describe_formula_token_zh(base)}的下角标{_describe_formula_token_zh(sub)}"
+            f"关于{_describe_formula_atom_zh(arg)}的函数"
+        )
 
     sub_match = re.fullmatch(r"([A-Za-z][A-Za-z0-9]*)_\{?([^{}()\s]+)\}?", value)
     if sub_match:
         base, sub = sub_match.groups()
-        return f"{base}的下角标{sub}"
+        return f"{_describe_formula_token_zh(base)}的下角标{_describe_formula_token_zh(sub)}"
 
     sup_match = re.fullmatch(r"([A-Za-z][A-Za-z0-9]*)\^\{?([^{}()\s]+)\}?", value)
     if sup_match:
         base, sup = sup_match.groups()
+        base_desc = _describe_formula_token_zh(base)
+        sup_desc = _describe_formula_token_zh(sup)
         if sup == "2":
-            return f"{base}的平方"
+            return f"{base_desc}的平方"
         if sup == "3":
-            return f"{base}的立方"
+            return f"{base_desc}的立方"
         if sup == "T":
-            return f"{base}的转置"
+            return f"{base_desc}的转置"
         if sup == "-1":
-            return f"{base}的逆"
-        return f"{base}的上角标{sup}"
+            return f"{base_desc}的逆"
+        return f"{base_desc}的上角标{sup_desc}"
 
     func_match = re.fullmatch(r"([A-Za-z][A-Za-z0-9]*)\((.+)\)", value)
     if func_match:
         base, arg = func_match.groups()
-        return f"{base}关于{_describe_formula_atom_zh(arg)}的函数"
+        return f"{_describe_formula_token_zh(base)}关于{_describe_formula_atom_zh(arg)}的函数"
 
     frac_match = re.fullmatch(r"\\frac\{(.+)\}\{(.+)\}", value)
     if frac_match:
@@ -652,7 +799,7 @@ def _describe_formula_atom_zh(expr: str) -> str:
     if sqrt_match:
         return f"根号 {_describe_formula_atom_zh(sqrt_match.group(1))}"
 
-    return value.replace("\\", "").strip()
+    return _readable_formula_symbol(value).replace("\\", "").strip()
 
 
 def _split_top_level_formula(text: str, separator: str) -> list[str]:
@@ -683,9 +830,17 @@ def _rule_describe_formula_zh(formula: str) -> str:
 
     arrow_parts = _split_top_level_formula(value, "\\to")
     if len(arrow_parts) == 2:
+        right_equals = _split_top_level_formula(arrow_parts[1], "=")
+        if len(right_equals) == 2:
+            target = _describe_formula_atom_zh(right_equals[0])
+            definition = _describe_formula_atom_zh(right_equals[1])
+            return (
+                f"由{_describe_formula_atom_zh(arrow_parts[0])}得到{target}，"
+                f"{target}定义为{definition}"
+            )
         return (
             f"{_describe_formula_atom_zh(arrow_parts[0])}"
-            f"映射到{_describe_formula_atom_zh(arrow_parts[1])}"
+            f"指向{_describe_formula_atom_zh(arrow_parts[1])}"
         )
 
     equals_parts = _split_top_level_formula(value, "=")
@@ -771,7 +926,7 @@ def _call_ollama_formula_verbalization_zh_single(
             "   - x_i: 读作 'x的下角标i'\n"
             "   - D_w: 读作 'D的下角标w'\n"
             "3. 箭头与关系符 (Arrows & Relations):\n"
-            "   - \\rightarrow 或 \\to: 读作 '映射到' 或 '趋近于' 或 '指向'\n"
+            "   - \\rightarrow 或 \\to: 优先按上下文读作 '指向'、'得到'、'转为'；只有函数映射语境才读作 '映射到'\n"
             "   - \\le: 读作 '小于等于'\n"
             "   - \\ge: 读作 '大于等于'\n"
             "   - \\approx: 读作 '约等于'\n"
@@ -784,7 +939,9 @@ def _call_ollama_formula_verbalization_zh_single(
             "   - \\partial: 读作 '偏导数'\n\n"
             "请参考上述规范，生成最符合学术和口语化标准的中文描述。\n"
             "Example: 'E = mc^2' -> 'E等于m乘以c的平方'.\n"
-            "Example: 'D_w \\rightarrow \\hat{B}(x)' -> 'D的下角标w映射到B的估计值关于x的函数'."
+            "Example: 'D_w \\rightarrow \\hat{B}(x)' -> 'D的下角标w指向B的估计值关于x的函数'.\n"
+            "Example: 'B_\\theta(x) \\rightarrow D_w = \\{(x_i, B_\\theta(x_i), w_i)\\}' -> "
+            "'由B的下角标theta关于x的函数得到D的下角标w，D的下角标w定义为由三元组组成的集合'."
         ),
         "prompt": prompt,
         "options": {

@@ -21,7 +21,8 @@
 - **Local translation** — Select text and translate it locally through Ollama (`translategemma:4b` by default, switchable to another local model)
 - **LLM read preparation** — Before read-aloud, selected text is normalized through local `translategemma:4b`: English is kept, Chinese is translated to English, and formulas become spoken English
 - **Formula-aware cleanup** — MathJax/MathML/LaTeX selections are extracted semantically when possible; translation keeps formula symbols and appends a Chinese/English description instead of replacing the formula
-- **Selection-aware UI** — Read/Translate controls and translation cards reposition around the selected text to reduce overlap
+- **Selection-aware UI** — Read/Translate controls collapse to the active action state, and translation cards reposition around the selected text to reduce overlap
+- **Partial formula selection recovery** — Selecting only part of a MathJax/MathML formula expands to the full formula container before translation or read preparation
 - **Smart queueing** — Backend checks client connection status to avoid processing dropped requests, preventing GPU OOM
 - **Robust UI cleanup** — Frontend uses `MutationObserver` and `AbortController` to cleanly handle SPA routing changes
 - **Playback progress** — Floating button shows a horizontal progress fill; streaming mode shows played seconds until final duration is known

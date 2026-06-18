@@ -354,8 +354,8 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertIn("$D_w \\rightarrow \\hat{B}(x)$", payload["translated_text"])
-        self.assertIn("D的下角标w映射到B的估计值关于x的函数", payload["translated_text"])
+        self.assertIn("D_w → B̂(x)", payload["translated_text"])
+        self.assertIn("D的下角标w指向B的估计值关于x的函数", payload["translated_text"])
         self.assertNotIn("__MATH_0__", payload["translated_text"])
         translate_call.assert_called_once_with(
             "This stage uses __MATH_0__.",
@@ -385,7 +385,7 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertIn("$D_w \\rightarrow \\hat{B}(x)$", payload["translated_text"])
+        self.assertIn("D_w → B̂(x)", payload["translated_text"])
         self.assertIn("D sub w maps to B hat of x", payload["translated_text"])
         self.assertNotIn("下标", payload["translated_text"])
         verbalize_call.assert_called_once_with(
@@ -393,6 +393,28 @@ class ApiTests(unittest.TestCase):
             "translategemma:4b",
             None,
         )
+
+    def test_translate_describes_dataset_arrow_without_mapping_wording(self):
+        with patch.object(
+            server,
+            "_call_ollama_translate_raw",
+            create=True,
+            return_value="公式为 __MATH_0__。",
+        ):
+            response = self.client.post(
+                "/translate",
+                json={
+                    "text": r"[[MATH: B_\theta(x)\rightarrow D_w=\{(x_i,B_\theta(x_i),w_i)\}]]",
+                    "target_language": "Simplified Chinese",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        translated = response.json()["translated_text"]
+        self.assertIn("B_θ(x) → D_w={(x_i,B_θ(x_i),w_i)}", translated)
+        self.assertIn("由B的下角标theta关于x的函数得到D的下角标w", translated)
+        self.assertIn("D的下角标w定义为由三元组", translated)
+        self.assertNotIn("映射到", translated)
 
     def test_read_prepare_uses_translategemma_by_default(self):
         with patch.object(

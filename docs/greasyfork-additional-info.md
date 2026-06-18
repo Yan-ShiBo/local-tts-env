@@ -22,7 +22,8 @@ Keep the GitHub links in both places: metadata makes them appear in Greasy Fork'
 - 英文会尽量原样保留，中文会翻成英文，公式会变成英文口语描述
 - MathJax/MathML/LaTeX 会优先提取语义公式；翻译结果保留公式符号，并附加专业中文描述
 - 如果朗读稿准备接口不可用，`Read` 会退回到 `/translate` 并指定翻译成 English 后再朗读
-- 按钮和译文卡片会根据选区自动选择上方或下方，减少遮挡正文
+- 点击 `Read` 或 `Translate` 后，浮层只保留当前操作的状态按钮；按钮和译文卡片会根据选区自动选择上方或下方，减少遮挡正文
+- 只选中 MathJax/MathML 公式的一部分时，脚本会尽量扩展到完整公式框再送去翻译或朗读稿处理
 
 ## 重要：需要本地服务
 

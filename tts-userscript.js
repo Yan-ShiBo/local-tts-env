@@ -3,7 +3,7 @@
 // @name:zh-CN   本地划词听译助手
 // @name:en      Local Selection Read & Translate
 // @namespace    https://github.com/Yan-ShiBo/local-tts-env
-// @version      1.11.0
+// @version      1.11.1
 // @description  选中文本即可本地朗读或翻译：Kokoro TTS 负责语音朗读，Ollama 模型负责本地翻译，文本不上传云端。
 // @description:en Select text on any page to read aloud locally with Kokoro TTS or translate locally through Ollama.
 // @author       Yan-ShiBo
@@ -513,6 +513,8 @@ if (typeof module !== "undefined" && module.exports) {
 if (typeof window !== "undefined" && typeof document !== "undefined") {
 (function () {
   "use strict";
+
+  const MATH_SELECTOR = 'math, mjx-container, script[type^="math/tex"], .MathJax, [data-latex], [data-tex], [data-math], [data-mathml]';
 
   // ════════════════════════════════════════════════════════
   //  Configuration
@@ -1421,7 +1423,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       .replace(/\r\n?/g, "\n")
       .replace(/\s+/g, " ")
       .replace(/\s*([{}_^=,+*/()])\s*/g, "$1")
-      .replace(/\s*(->|→|\\to|\\mapsto)\s*/g, " \\to ")
+      .replace(/\s*(->|→|⇒|↦|\\to|\\rightarrow|\\mapsto)\s*/g, " \\to ")
       .replace(/\s+/g, " ")
       .trim();
   }
@@ -1576,6 +1578,21 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     );
   }
 
+  function closestSemanticMathElement(node) {
+    let element = null;
+    if (!node) return null;
+    if (node.nodeType === 1) {
+      element = node;
+    } else {
+      element = node.parentElement || node.parentNode;
+    }
+    while (element && element.nodeType === 1) {
+      if (isSemanticMathElement(element)) return element;
+      element = element.parentElement;
+    }
+    return null;
+  }
+
   function serializeSelectionNode(node) {
     if (!node) return "";
     if (node.nodeType === 3) return node.nodeValue || "";
@@ -1607,23 +1624,39 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
 
   function expandRangeToContainMath(range) {
     if (!range) return range;
-    const common = range.commonAncestorContainer;
-    if (!common) return range;
-    const root = common.nodeType === 1 ? common : (common.parentElement || common.parentNode);
-    if (!root || typeof root.querySelectorAll !== "function") return range;
+    const newRange = range.cloneRange();
+    const startMath = closestSemanticMathElement(range.startContainer);
+    const endMath = closestSemanticMathElement(range.endContainer);
 
-    const mathSelector = 'math, mjx-container, script[type^="math/tex"], .MathJax, [data-latex], [data-tex], [data-math], [data-mathml]';
-    let mathElements = [];
     try {
-      mathElements = Array.from(root.querySelectorAll(mathSelector));
-      if (typeof root.matches === "function" && root.matches(mathSelector)) {
-        mathElements.push(root);
+      if (startMath && startMath.parentNode) {
+        newRange.setStartBefore(startMath);
+      }
+      if (endMath && endMath.parentNode) {
+        newRange.setEndAfter(endMath);
       }
     } catch (e) {
-      return range;
+      // Continue with query-based expansion below.
     }
 
-    const newRange = range.cloneRange();
+    const common = range.commonAncestorContainer;
+    if (!common) return newRange;
+    const root = common.nodeType === 1 ? common : (common.parentElement || common.parentNode);
+    if (!root || typeof root.querySelectorAll !== "function") return newRange;
+
+    let mathElements = [];
+    try {
+      const scanRoot = root.closest && root.closest("p, li, div, section, article, body")
+        ? root.closest("p, li, div, section, article, body")
+        : root;
+      mathElements = Array.from(scanRoot.querySelectorAll(MATH_SELECTOR));
+      if (typeof scanRoot.matches === "function" && scanRoot.matches(MATH_SELECTOR)) {
+        mathElements.push(scanRoot);
+      }
+    } catch (e) {
+      return newRange;
+    }
+
     for (const mathEl of mathElements) {
       try {
         if (newRange.intersectsNode(mathEl)) {
@@ -1657,12 +1690,11 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
 
   function removeButton() {
     cancelTranslationRequest();
-    if (floatingBtn) {
-      floatingBtn.style.animation = "tts-fade-out 0.15s ease-in forwards";
-      const btn = floatingBtn;
-      setTimeout(() => btn.remove(), 150);
-      floatingBtn = null;
-    }
+    document.querySelectorAll(".tts-float-container").forEach((container) => {
+      container.style.animation = "tts-fade-out 0.15s ease-in forwards";
+      setTimeout(() => container.remove(), 150);
+    });
+    floatingBtn = null;
   }
 
   function stopAudio() {
@@ -1689,6 +1721,19 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       container.remove();
       if (floatingBtn === container) floatingBtn = null;
     }, 150);
+  }
+
+  function focusFloatingAction(container, activeButton) {
+    if (!container || !activeButton) return;
+    const actions = container.querySelector(".tts-float-actions");
+    if (!actions) return;
+    Array.from(actions.children).forEach((child) => {
+      if (child !== activeButton) child.remove();
+    });
+    activeButton.classList.add("tts-active-action");
+    requestAnimationFrame(() => {
+      positionFloatingContainer(container, container._ttsSelectionRect);
+    });
   }
 
   function normalizeSelectionRect(rect) {
@@ -2371,6 +2416,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     isTranslating = true;
     const generation = translationGate.begin();
     removeTranslationCard(buttonContainer);
+    focusFloatingAction(buttonContainer, btnElement);
 
     if (btnElement) {
       setButtonHtml(
@@ -2669,6 +2715,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     const buttonContainer = btnElement
       ? btnElement.closest(".tts-float-container")
       : null;
+    focusFloatingAction(buttonContainer, btnElement);
 
     if (btnElement) {
       setButtonHtml(
@@ -2754,7 +2801,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       if (text.length > 1) {
         const selection = window.getSelection();
         if (selection.rangeCount > 0) {
-          const range = selection.getRangeAt(0);
+          const range = expandRangeToContainMath(selection.getRangeAt(0));
           const rect = range.getBoundingClientRect();
           showButton(rect, text);
         }
@@ -2798,7 +2845,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
         e.preventDefault();
         const selection = window.getSelection();
         if (selection.rangeCount > 0) {
-          const range = selection.getRangeAt(0);
+          const range = expandRangeToContainMath(selection.getRangeAt(0));
           const rect = range.getBoundingClientRect();
           showButton(rect, text);
           const btn = floatingBtn.querySelector(".tts-speak-btn");
