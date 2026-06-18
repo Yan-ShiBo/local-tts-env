@@ -1594,6 +1594,42 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     return blockTags.has(tag) ? `\n${text}\n` : text;
   }
 
+  function expandRangeToContainMath(range) {
+    if (!range) return range;
+    const common = range.commonAncestorContainer;
+    if (!common) return range;
+    const root = common.nodeType === 1 ? common : (common.parentElement || common.parentNode);
+    if (!root || typeof root.querySelectorAll !== "function") return range;
+
+    const mathSelector = 'math, mjx-container, script[type^="math/tex"], .MathJax, [data-latex], [data-tex], [data-math], [data-mathml]';
+    let mathElements = [];
+    try {
+      mathElements = Array.from(root.querySelectorAll(mathSelector));
+      if (typeof root.matches === "function" && root.matches(mathSelector)) {
+        mathElements.push(root);
+      }
+    } catch (e) {
+      return range;
+    }
+
+    const newRange = range.cloneRange();
+    for (const mathEl of mathElements) {
+      try {
+        if (newRange.intersectsNode(mathEl)) {
+          if (mathEl.contains(newRange.startContainer)) {
+            newRange.setStartBefore(mathEl);
+          }
+          if (mathEl.contains(newRange.endContainer)) {
+            newRange.setEndAfter(mathEl);
+          }
+        }
+      } catch (e) {
+        // Ignore errors on specific nodes
+      }
+    }
+    return newRange;
+  }
+
   function getSelectedText() {
     const selection = window.getSelection();
     if (!selection) return "";
@@ -1601,7 +1637,8 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     const semanticParts = [];
     for (let index = 0; index < selection.rangeCount; index += 1) {
       const range = selection.getRangeAt(index);
-      semanticParts.push(serializeSelectionNode(range.cloneContents()));
+      const expandedRange = expandRangeToContainMath(range);
+      semanticParts.push(serializeSelectionNode(expandedRange.cloneContents()));
     }
     const semanticText = normalizeSelectionOutput(semanticParts.join("\n"));
     return semanticText || plainText;
