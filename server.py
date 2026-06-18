@@ -622,12 +622,35 @@ def _call_ollama_formula_verbalization_zh_single(
         "model": model,
         "stream": False,
         "system": (
-            "You convert a mathematical formula into a concise spoken Simplified Chinese description (口语化中文描述). "
-            "Describe only what is written; never solve, simplify, calculate, or infer missing meanings. "
-            "Return ONLY the spoken description, with no reasoning, notes, markdown fences, symbols, or explanations. "
-            "Example: 'E = mc^2' -> 'E等于m乘以c the power of 2'. "
-            "Example: '\\frac{x}{y}' -> 'y分之x'. "
-            "Example: 'a \\le b' -> 'a小于等于b'."
+            "You convert a mathematical formula into a professional spoken Simplified Chinese description (口语化中文描述).\n"
+            "Describe only what is written; never solve, simplify, calculate, or infer missing meanings.\n"
+            "Return ONLY the spoken description, with no reasoning, notes, markdown fences, symbols, or explanations.\n\n"
+            "数学术语及读法规范对照表 (Mathematical Glossary & Reading Standards):\n"
+            "1. 上标/修饰符 (Superscripts/Modifiers):\n"
+            "   - \\hat{x} 或 \\hat x (Hat): 读作 'x的估计值' 或 'x帽'\n"
+            "   - \\bar{x} 或 \\bar x (Bar): 读作 'x的平均值' 或 'x拔'\n"
+            "   - \\tilde{x} 或 \\tilde x (Tilde): 读作 'x波浪号'\n"
+            "   - x^* (Conjugate): 读作 'x的共轭' 或 'x星'\n"
+            "   - x^T (Transpose): 读作 'x的转置'\n"
+            "   - x^{-1} (Inverse): 读作 'x的逆'\n"
+            "2. 下角标 (Subscripts):\n"
+            "   - x_i: 读作 'x的下角标i'\n"
+            "   - D_w: 读作 'D的下角标w'\n"
+            "3. 箭头与关系符 (Arrows & Relations):\n"
+            "   - \\rightarrow 或 \\to: 读作 '映射到' 或 '趋近于' 或 '指向'\n"
+            "   - \\le: 读作 '小于等于'\n"
+            "   - \\ge: 读作 '大于等于'\n"
+            "   - \\approx: 读作 '约等于'\n"
+            "   - \\neq: 读作 '不等于'\n"
+            "4. 常见数学函数与运算 (Functions & Operators):\n"
+            "   - f(x): 读作 'f关于x的函数' 或 'f(x)'\n"
+            "   - \\frac{a}{b}: 读作 'b分之a'\n"
+            "   - \\sqrt{x}: 读作 '根号x'\n"
+            "   - \\sum: 读作 '求和'\n"
+            "   - \\partial: 读作 '偏导数'\n\n"
+            "请参考上述规范，生成最符合学术和口语化标准的中文描述。\n"
+            "Example: 'E = mc^2' -> 'E等于m乘以c的平方'.\n"
+            "Example: 'D_w \\rightarrow \\hat{B}(x)' -> 'D的下角标w映射到B的估计值关于x的函数'."
         ),
         "prompt": prompt,
         "options": {
@@ -1215,7 +1238,7 @@ async def translate_endpoint(request: TranslateRequest):
                     _call_ollama_formula_verbalization_zh_single,
                     form,
                     model,
-                    text,
+                    None,
                 )
                 for form in formula_texts
             ]
