@@ -75,8 +75,9 @@ WARMUP_ENABLED = os.environ.get("KOKORO_WARMUP", "1") != "0"
 SUPPORTED_AUDIO_FORMATS = {"wav", "ogg"}
 STREAM_CHUNK_BYTES = 16384
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-OLLAMA_TRANSLATE_MODEL = os.environ.get("OLLAMA_TRANSLATE_MODEL", "qwen3:14b")
+OLLAMA_TRANSLATE_MODEL = os.environ.get("OLLAMA_TRANSLATE_MODEL", "translategemma:4b")
 OLLAMA_FORMULA_MODEL = os.environ.get("OLLAMA_FORMULA_MODEL", "translategemma:4b")
+OLLAMA_READ_MODEL = os.environ.get("OLLAMA_READ_MODEL", "translategemma:4b")
 OLLAMA_TRANSLATE_TIMEOUT = float(os.environ.get("OLLAMA_TRANSLATE_TIMEOUT", "90"))
 
 if VOICE not in AVAILABLE_VOICES:
@@ -191,7 +192,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Kokoro TTS 本地服务",
     description="本地运行的高质量英文 TTS 服务（Kokoro 82M）",
-    version="1.5.0",
+    version="1.6.0",
     lifespan=lifespan,
 )
 
@@ -266,6 +267,32 @@ class TranslateResponse(BaseModel):
     translated_text: str
     model: str
     target_language: str
+    elapsed: float
+
+
+class ReadPrepareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(max_length=12000)
+    model: Optional[str] = Field(default=None, max_length=120)
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value):
+        if value is None:
+            return value
+        model = value.strip()
+        if not model:
+            raise ValueError("model cannot be blank")
+        if any(ch.isspace() for ch in model):
+            raise ValueError("model cannot contain whitespace")
+        return model
+
+
+class ReadPrepareResponse(BaseModel):
+    text: str
+    prepared_text: str
+    model: str
     elapsed: float
 
 
@@ -429,6 +456,18 @@ def _clean_translation_response(text: str) -> str:
     return cleaned.strip().strip('"').strip()
 
 
+def _normalize_llm_source_text(text: str) -> str:
+    value = re.sub(r"[\u200b-\u200f\ufeff]", "", text or "")
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    paragraphs = []
+    for paragraph in re.split(r"\n\s*\n+", value):
+        normalized = re.sub(r"[ \t]*\n[ \t]*", " ", paragraph)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        if normalized:
+            paragraphs.append(normalized)
+    return "\n\n".join(paragraphs)
+
+
 def _call_ollama_json(path: str, timeout: float = 5.0):
     req = urllib_request.Request(
         f"{OLLAMA_BASE_URL}{path}",
@@ -467,10 +506,13 @@ def _call_ollama_translate(text: str, model: str, target_language: str) -> str:
         "model": model,
         "stream": False,
         "system": (
-            "You are a precise translation engine. Translate the user's text "
-            f"into {target_language}. Preserve meaning, names, numbers, URLs, "
-            "markdown, and code. Return only the translated text, with no "
-            "reasoning, notes, or explanations."
+            "You are a precise translation engine. The input may contain web selection "
+            "artifacts, MathJax, LaTeX, or formulas split across many line breaks. "
+            f"Translate prose into {target_language}. Preserve meaning, names, and "
+            "numbers. Convert formulas and mathematical symbols into natural spoken "
+            f"descriptions in {target_language}; do not solve or calculate them. "
+            "Remove obvious URL/citation noise. Return only the translated text, with "
+            "no reasoning, notes, markdown fences, or explanations."
         ),
         "prompt": text,
         "options": {
@@ -505,6 +547,119 @@ def _call_ollama_translate(text: str, model: str, target_language: str) -> str:
     if not translated:
         raise RuntimeError("Ollama returned an empty translation")
     return translated
+
+
+def _contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff\uf900-\ufaff]", text or ""))
+
+
+def _remove_remaining_cjk_for_tts(text: str) -> str:
+    cleaned = (text or "").replace("\u5176\u4e2d", "where ")
+    cleaned = re.sub(r"[\u3400-\u9fff\uf900-\ufaff]+", " ", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" *\n *", "\n", cleaned)
+    return cleaned.strip()
+
+
+def _call_ollama_text_generation(
+    *,
+    model: str,
+    system: str,
+    prompt: str,
+    timeout_detail: str,
+    empty_detail: str,
+) -> str:
+    payload = {
+        "model": model,
+        "stream": False,
+        "system": system,
+        "prompt": prompt,
+        "options": {
+            "temperature": 0.1,
+            "top_p": 0.9,
+        },
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib_request.Request(
+        f"{OLLAMA_BASE_URL}/api/generate",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(req, timeout=OLLAMA_TRANSLATE_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib_error.HTTPError as error:
+        raise RuntimeError(f"Ollama returned HTTP {error.code}") from error
+    except urllib_error.URLError as error:
+        raise RuntimeError("Cannot connect to Ollama") from error
+    except TimeoutError as error:
+        raise RuntimeError(timeout_detail) from error
+
+    try:
+        response_payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Ollama returned invalid JSON") from error
+
+    result = _clean_translation_response(response_payload.get("response", ""))
+    if not result:
+        raise RuntimeError(empty_detail)
+    return result
+
+
+def _call_ollama_read_prepare(text: str, model: str) -> str:
+    system_prompt = (
+        "You prepare selected web text for English text-to-speech. The input may "
+        "contain Chinese, English, LaTeX, MathJax, formula fragments, and artificial "
+        "line breaks from web selection. Produce fluent plain English read-aloud text. "
+        "Keep English prose unchanged except for spacing and obvious selection cleanup. "
+        "Translate Chinese prose into natural English. Convert formulas, LaTeX, symbols, "
+        "and MathJax fragments into concise spoken English descriptions. Do not copy raw "
+        "formula syntax into the output. Read arrows as 'maps to' or 'to', equals signs as "
+        "'equals', braces as 'the set of', tuples as 'tuples', and obvious subscripts as "
+        "'sub'. No Chinese characters may remain in the output; translate every Chinese "
+        "word, including Chinese inside mixed Chinese-English sentences. Describe only "
+        "what is written; never solve, simplify, calculate determinants, "
+        "or infer missing results. Remove code blocks, URLs, citation markers, table debris, "
+        "and UI text when they are not meaningful prose. Preserve the original order. "
+        "Example: input 'B 0 (x) -> D w = {(x i, B 0 (x i), w i)}' should become "
+        "'B sub zero of x maps to D sub w, which equals the set of tuples containing "
+        "x sub i, B sub zero of x sub i, and w sub i.' Return only the final English text, "
+        "with no notes, markdown fences, labels, or explanations."
+    )
+    prepared = _call_ollama_text_generation(
+        model=model,
+        system=system_prompt,
+        prompt=text,
+        timeout_detail="Ollama read preparation timed out",
+        empty_detail="Ollama returned an empty read preparation",
+    )
+    prepared = re.sub(r"\s+\n", "\n", prepared)
+    prepared = re.sub(r"\n{3,}", "\n\n", prepared)
+    prepared = re.sub(r"[ \t]{2,}", " ", prepared).strip()
+    if not prepared:
+        raise RuntimeError("Ollama returned an empty read preparation")
+    if _contains_cjk(prepared):
+        repair_prompt = (
+            "Rewrite the following text as English-only read-aloud text. Translate every "
+            "remaining Chinese character or word into English. Keep existing English prose "
+            "and spoken formula descriptions. Do not add notes or explanations. Output plain "
+            "English only."
+        )
+        prepared = _call_ollama_text_generation(
+            model=model,
+            system=repair_prompt,
+            prompt=prepared,
+            timeout_detail="Ollama read repair timed out",
+            empty_detail="Ollama returned an empty read repair",
+        )
+        prepared = re.sub(r"\s+\n", "\n", prepared)
+        prepared = re.sub(r"\n{3,}", "\n\n", prepared)
+        prepared = re.sub(r"[ \t]{2,}", " ", prepared).strip()
+    if _contains_cjk(prepared):
+        prepared = _remove_remaining_cjk_for_tts(prepared)
+    return prepared
 
 
 def _clean_formula_verbalization(value: str) -> str:
@@ -835,7 +990,7 @@ async def translate_health(model: Optional[str] = None):
 @app.post("/translate", response_model=TranslateResponse)
 async def translate_endpoint(request: TranslateRequest):
     """Translate text through the local Ollama API."""
-    text = request.text.strip()
+    text = _normalize_llm_source_text(request.text.strip())
     if not text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
@@ -868,6 +1023,39 @@ async def translate_endpoint(request: TranslateRequest):
     )
 
 
+@app.post("/read/prepare", response_model=ReadPrepareResponse)
+async def read_prepare_endpoint(request: ReadPrepareRequest):
+    """Prepare selected web text as clean English read-aloud text."""
+    text = _normalize_llm_source_text(request.text.strip())
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    model = request.model or OLLAMA_READ_MODEL
+
+    try:
+        t0 = time.perf_counter()
+        prepared_text = await asyncio.to_thread(
+            _call_ollama_read_prepare,
+            text,
+            model,
+        )
+        elapsed = time.perf_counter() - t0
+        print(
+            f"[READ PREPARE] {len(text)} chars -> {len(prepared_text)} chars, "
+            f"model={model}, took {elapsed:.2f}s"
+        )
+    except Exception as error:
+        print(f"[ERROR] Read preparation failed: {error}")
+        raise HTTPException(status_code=502, detail="Local read preparation failed")
+
+    return ReadPrepareResponse(
+        text=text,
+        prepared_text=prepared_text,
+        model=model,
+        elapsed=round(elapsed, 3),
+    )
+
+
 @app.post("/formula/verbalize", response_model=FormulaVerbalizeResponse)
 async def formula_verbalize_endpoint(request: FormulaVerbalizeRequest):
     """Convert formulas into concise spoken English through local Ollama."""
@@ -878,7 +1066,7 @@ async def formula_verbalize_endpoint(request: FormulaVerbalizeRequest):
             _call_ollama_formula_verbalization,
             request.formulas,
             model,
-            request.context,
+            _normalize_llm_source_text(request.context or ""),
         )
         elapsed = time.perf_counter() - t0
         print(
@@ -1082,6 +1270,7 @@ async def health_check():
         "ollama_base_url": OLLAMA_BASE_URL,
         "default_translate_model": OLLAMA_TRANSLATE_MODEL,
         "default_formula_model": OLLAMA_FORMULA_MODEL,
+        "default_read_model": OLLAMA_READ_MODEL,
     }
 
 

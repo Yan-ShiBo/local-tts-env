@@ -298,6 +298,28 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
 
+    def test_translate_normalizes_selection_linebreaks(self):
+        with patch.object(
+            server,
+            "_call_ollama_translate",
+            create=True,
+            return_value="formula description",
+        ) as call:
+            response = self.client.post(
+                "/translate",
+                json={
+                    "text": "B\n0\n(x)\n->\nD\nw\n\n中文说明",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["model"], "translategemma:4b")
+        call.assert_called_once_with(
+            "B 0 (x) -> D w\n\n中文说明",
+            "translategemma:4b",
+            "Simplified Chinese",
+        )
+
     def test_translate_hides_ollama_errors(self):
         with patch.object(
             server,
@@ -313,6 +335,59 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.json()["detail"], "Local Ollama translation failed")
         self.assertNotIn("secret model path", response.text)
+
+    def test_read_prepare_uses_translategemma_by_default(self):
+        with patch.object(
+            server,
+            "_call_ollama_read_prepare",
+            create=True,
+            return_value="This stage uses B zero of x mapped to D w.",
+        ) as call:
+            response = self.client.post(
+                "/read/prepare",
+                json={
+                    "text": "这一阶段是：\n\nB\n0\n(x)\n->\nD\nw",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["model"], "translategemma:4b")
+        self.assertEqual(
+            payload["prepared_text"],
+            "This stage uses B zero of x mapped to D w.",
+        )
+        call.assert_called_once_with(
+            "这一阶段是：\n\nB 0 (x) -> D w",
+            "translategemma:4b",
+        )
+
+    def test_read_prepare_hides_ollama_errors(self):
+        with patch.object(
+            server,
+            "_call_ollama_read_prepare",
+            create=True,
+            side_effect=RuntimeError("secret read prompt"),
+        ):
+            response = self.client.post(
+                "/read/prepare",
+                json={"text": "中文 and $x^2$"},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"], "Local read preparation failed")
+        self.assertNotIn("secret read prompt", response.text)
+
+    def test_read_prepare_final_cleanup_removes_remaining_chinese(self):
+        cleaned = server._remove_remaining_cjk_for_tts(
+            "其中 B sub zero of x is a neural barrier candidate."
+        )
+
+        self.assertEqual(
+            cleaned,
+            "where B sub zero of x is a neural barrier candidate.",
+        )
+        self.assertFalse(server._contains_cjk(cleaned))
 
     def test_formula_verbalize_uses_local_ollama(self):
         with patch.object(
@@ -385,7 +460,7 @@ class ApiTests(unittest.TestCase):
             if path == "/api/tags":
                 return {"models": [{"name": "qwen3:14b"}, {"name": "translategemma:4b"}]}
             if path == "/api/ps":
-                return {"models": [{"name": "qwen3:14b"}]}
+                return {"models": [{"name": "translategemma:4b"}]}
             raise AssertionError(path)
 
         with patch.object(
@@ -394,11 +469,12 @@ class ApiTests(unittest.TestCase):
             create=True,
             side_effect=fake_ollama_json,
         ):
-            response = self.client.get("/translate/health?model=qwen3:14b")
+            response = self.client.get("/translate/health")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["status"], "running")
+        self.assertEqual(payload["model"], "translategemma:4b")
         self.assertTrue(payload["ollama_reachable"])
         self.assertTrue(payload["model_available"])
         self.assertTrue(payload["model_running"])
@@ -410,7 +486,7 @@ class ApiTests(unittest.TestCase):
             create=True,
             side_effect=RuntimeError("secret connection details"),
         ):
-            response = self.client.get("/translate/health?model=qwen3:14b")
+            response = self.client.get("/translate/health")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -427,6 +503,8 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(payload["service"], "kokoro-tts")
         self.assertTrue(payload["ready"])
         self.assertEqual(payload["default_translate_model"], server.OLLAMA_TRANSLATE_MODEL)
+        self.assertEqual(payload["default_read_model"], server.OLLAMA_READ_MODEL)
+        self.assertEqual(payload["default_formula_model"], server.OLLAMA_FORMULA_MODEL)
 
     def test_openapi_declares_wav_response(self):
         content = server.app.openapi()["paths"]["/tts"]["post"]["responses"]["200"][

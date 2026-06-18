@@ -3,7 +3,7 @@
 // @name:zh-CN   本地划词听译助手
 // @name:en      Local Selection Read & Translate
 // @namespace    https://github.com/Yan-ShiBo/local-tts-env
-// @version      1.8.0
+// @version      1.9.0
 // @description  选中文本即可本地朗读或翻译：Kokoro TTS 负责语音朗读，Ollama 模型负责本地翻译，文本不上传云端。
 // @description:en Select text on any page to read aloud locally with Kokoro TTS or translate locally through Ollama.
 // @author       Yan-ShiBo
@@ -188,6 +188,22 @@ const KokoroTTSCore = (() => {
     const normalized = String(text || "").replace(/\s+/g, "");
     if (!normalized) return 0;
     return countMatches(normalized, /[\u3400-\u9FFF\uF900-\uFAFF]/g) / normalized.length;
+  }
+
+  function normalizeLlmSourceText(text) {
+    const value = String(text || "")
+      .replace(/[\u200B-\u200F\uFEFF]/g, "")
+      .replace(/\r\n?/g, "\n");
+    return value
+      .split(/\n\s*\n+/)
+      .map((paragraph) =>
+        paragraph
+          .replace(/[ \t]*\n[ \t]*/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+      )
+      .filter(Boolean)
+      .join("\n\n");
   }
 
   function verbalizeSimpleFormula(formula) {
@@ -479,6 +495,7 @@ const KokoroTTSCore = (() => {
     isUnsupportedMediaError,
     normalizeAudioBuffer,
     normalizeAudioBlob,
+    normalizeLlmSourceText,
     prepareTextForRead,
     prepareTextForReadPlan,
     releaseAudio,
@@ -507,6 +524,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   const API_STREAM_URL = API_BASE + "/tts/stream";
   const API_TRANSLATE_URL = API_BASE + "/translate";
   const API_TRANSLATE_HEALTH_URL = API_BASE + "/translate/health";
+  const API_READ_PREPARE_URL = API_BASE + "/read/prepare";
   const API_FORMULA_VERBALIZE_URL = API_BASE + "/formula/verbalize";
   const SHORTCUT = { ctrl: true, shift: true, key: "S" }; // Ctrl+Shift+S
 
@@ -516,9 +534,10 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
 
   // Default settings (overridden by GM storage)
   const DEFAULTS = {
+    settingsVersion: 2,
     voice: TTS_CATALOG.default_voice,
     speed: TTS_CATALOG.default_speed,
-    translateModel: "qwen3:14b",
+    translateModel: "translategemma:4b",
     targetLanguage: "Simplified Chinese",
   };
 
@@ -536,8 +555,8 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   }));
 
   const TRANSLATION_MODELS = [
+    { value: "translategemma:4b", label: "translategemma:4b - default" },
     { value: "qwen3:14b", label: "qwen3:14b - accurate" },
-    { value: "translategemma:4b", label: "translategemma:4b - fast" },
     { value: "qwen3:4b", label: "qwen3:4b - lightweight" },
     { value: "glm4:9b", label: "glm4:9b" },
     { value: "zhou-xingmei:latest", label: "zhou-xingmei:latest" },
@@ -564,10 +583,14 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
         group.voices.some((voice) => voice.id === saved.voice)
       );
       const speedExists = SPEEDS.some((speed) => speed.value === saved.speed);
-      const translateModel =
+      const savedVersion = Number(saved.settingsVersion) || 0;
+      let translateModel =
         typeof saved.translateModel === "string" && saved.translateModel.trim()
           ? saved.translateModel.trim()
           : DEFAULTS.translateModel;
+      if (savedVersion < 2 && translateModel === "qwen3:14b") {
+        translateModel = DEFAULTS.translateModel;
+      }
       const targetLanguage =
         typeof saved.targetLanguage === "string" && saved.targetLanguage.trim()
           ? saved.targetLanguage.trim()
@@ -577,6 +600,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
         speed: speedExists ? saved.speed : DEFAULTS.speed,
         translateModel,
         targetLanguage,
+        settingsVersion: DEFAULTS.settingsVersion,
       };
     } catch { return { ...DEFAULTS }; }
   }
@@ -1689,6 +1713,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
 
   async function fetchTranslation(text, generation) {
     return new Promise((resolve, reject) => {
+      const sourceText = KokoroTTSCore.normalizeLlmSourceText(text);
       const request = GM_xmlhttpRequest({
         method: "POST",
         url: API_TRANSLATE_URL,
@@ -1697,7 +1722,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
           "Content-Type": "application/json",
         },
         data: JSON.stringify({
-          text,
+          text: sourceText,
           model: settings.translateModel,
           target_language: settings.targetLanguage,
         }),
@@ -1732,6 +1757,58 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
         onabort: () => reject(new Error("Translation cancelled.")),
       });
       translationGate.attach(generation, request);
+    });
+  }
+
+  async function fetchReadPreparation(text, generation) {
+    return new Promise((resolve, reject) => {
+      const sourceText = KokoroTTSCore.normalizeLlmSourceText(text);
+      const request = GM_xmlhttpRequest({
+        method: "POST",
+        url: API_READ_PREPARE_URL,
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+        },
+        data: JSON.stringify({
+          text: sourceText,
+        }),
+        responseType: "json",
+        timeout: 120000,
+        onload: (response) => {
+          if (!requestGate.isCurrent(generation)) return;
+          requestGate.finish(generation);
+          if (response.status >= 200 && response.status < 300) {
+            try {
+              const payload = response.response || JSON.parse(response.responseText || "{}");
+              resolve(payload);
+            } catch (error) {
+              reject(error);
+            }
+          } else {
+            let detail = response.statusText || "Read preparation failed";
+            try {
+              const payload = JSON.parse(response.responseText || "{}");
+              if (payload.detail) detail = payload.detail;
+            } catch {}
+            reject(new Error(`Server returned ${response.status}: ${detail}`));
+          }
+        },
+        onerror: () => {
+          if (!requestGate.isCurrent(generation)) return;
+          requestGate.finish(generation);
+          reject(new Error("Cannot connect to read preparation server."));
+        },
+        ontimeout: () => {
+          if (!requestGate.isCurrent(generation)) return;
+          requestGate.finish(generation);
+          reject(new Error("Read preparation timeout."));
+        },
+        onabort: () => reject(new Error("Read preparation cancelled.")),
+      });
+      if (!requestGate.attach(generation, request)) {
+        reject(new Error("Read preparation cancelled."));
+      }
     });
   }
 
@@ -1789,6 +1866,31 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   }
 
   async function prepareReadableTextForSpeak(text, generation) {
+    try {
+      const payload = await fetchReadPreparation(text, generation);
+      if (!requestGate.isCurrent(generation)) {
+        return { text: "", formulas: [], changed: false, empty: true };
+      }
+      const preparedText = String(payload && payload.prepared_text ? payload.prepared_text : "")
+        .replace(/\n{3,}/g, "\n\n")
+        .replace(/[ \t]{2,}/g, " ")
+        .trim();
+      if (preparedText) {
+        return {
+          text: preparedText,
+          formulas: [],
+          changed: preparedText !== String(text || "").trim(),
+          removedChinese: /[\u3400-\u9FFF\uF900-\uFAFF]/.test(String(text || "")) &&
+            !/[\u3400-\u9FFF\uF900-\uFAFF]/.test(preparedText),
+          empty: false,
+          llmPrepared: true,
+        };
+      }
+    } catch (error) {
+      if (!requestGate.isCurrent(generation)) throw error;
+      console.warn("[Kokoro TTS] Read preparation failed; falling back to local cleanup", error);
+    }
+
     const plan = KokoroTTSCore.prepareTextForReadPlan(text);
     if (plan.formulas.length === 0) {
       return plan;

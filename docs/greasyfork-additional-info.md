@@ -15,12 +15,12 @@ Keep the GitHub links in both places: metadata makes them appear in Greasy Fork'
 
 选中网页上的文本后，可以直接：
 
-- `Read`：调用本机 Kokoro TTS 服务朗读
-- `Translate`：调用本机 Ollama 模型翻译
+- `Read`：先调用本机 `translategemma:4b` 准备英文朗读稿，再交给 Kokoro TTS 朗读
+- `Translate`：调用本机 Ollama 模型翻译，默认 `translategemma:4b`
 - 在设置面板里切换声音、语速、翻译模型和目标语言
 - 查看本地 TTS 服务与 Ollama 模型状态
-- `Read` 会先清洗文本：中文、代码块、URL、表格碎片和噪声符号不会送进英文 TTS
-- 简单公式会规则口语化，复杂公式会交给本地 `translategemma:4b` 生成英文口语描述
+- 英文会尽量原样保留，中文会翻成英文，公式会变成英文口语描述
+- MathJax/LaTeX 选区造成的大量换行会先合并，再交给翻译或朗读稿模型处理
 
 ## 重要：需要本地服务
 
@@ -32,12 +32,11 @@ Keep the GitHub links in both places: metadata makes them appear in Greasy Fork'
 
 ```powershell
 ollama pull translategemma:4b
+# 可选更大模型
 ollama pull qwen3:14b
 ```
 
-推荐实时翻译优先使用 `translategemma:4b`，速度通常比 Qwen3 系列更适合划词场景。
-
-复杂公式口语化也默认使用 `translategemma:4b`，可在服务端通过 `OLLAMA_FORMULA_MODEL` 覆盖。如果公式口语化变慢，通常是 Ollama 第一次加载模型。
+翻译、朗读稿准备和复杂公式口语化默认都使用 `translategemma:4b`。可在服务端通过 `OLLAMA_TRANSLATE_MODEL`、`OLLAMA_READ_MODEL`、`OLLAMA_FORMULA_MODEL` 覆盖。如果第一次变慢，通常是 Ollama 正在加载模型。
 
 ## 隐私说明
 

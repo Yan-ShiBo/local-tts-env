@@ -15,6 +15,7 @@ test("userscript core can be imported without browser globals", () => {
   assert.equal(typeof core.selectBlobAudioFormat, "function");
   assert.equal(typeof core.normalizeAudioBlob, "function");
   assert.equal(typeof core.normalizeAudioBuffer, "function");
+  assert.equal(typeof core.normalizeLlmSourceText, "function");
   assert.equal(typeof core.prepareTextForReadPlan, "function");
   assert.equal(typeof core.applyFormulaVerbalizations, "function");
 });
@@ -251,6 +252,38 @@ const noisy = true;
   assert.equal(prepared.text, "English text should remain. Visit for details.");
   assert.equal(prepared.removedChinese, true);
   assert.equal(prepared.empty, false);
+});
+
+
+test("LLM source normalization collapses formula selection line breaks", () => {
+  const { normalizeLlmSourceText } = require("../tts-userscript.js");
+  const normalized = normalizeLlmSourceText(`
+前两阶段是:
+
+B
+0
+(x)
+->
+D
+w
+=
+{(x
+i
+,
+B
+0
+(x
+i
+),
+w
+i
+)}
+`);
+
+  assert.equal(
+    normalized,
+    "前两阶段是:\n\nB 0 (x) -> D w = {(x i , B 0 (x i ), w i )}"
+  );
 });
 
 
