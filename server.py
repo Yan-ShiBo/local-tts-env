@@ -1185,7 +1185,7 @@ async def tts_endpoint(
     try:
         # 带有客户端感知（is_disconnected）的排队机制
         while True:
-            if await request.is_disconnected():
+            if http_request and await http_request.is_disconnected():
                 print("[TTS] Client disconnected before acquiring lock, aborting.")
                 raise HTTPException(status_code=499, detail="Client Closed Request")
             try:
@@ -1246,6 +1246,7 @@ async def tts_endpoint(
 )
 async def tts_stream_endpoint(
     request: TTSRequest,
+    http_request: Request,
     format: Optional[str] = None,
 ):
     """流式文本转语音，返回 MediaSource 兼容的 WebM/Opus。"""
@@ -1267,7 +1268,7 @@ async def tts_stream_endpoint(
     try:
         # 带有客户端感知（is_disconnected）的排队机制
         while True:
-            if await request.is_disconnected():
+            if await http_request.is_disconnected():
                 print("[TTS] Client disconnected before acquiring lock, aborting.")
                 raise HTTPException(status_code=499, detail="Client Closed Request")
             try:
@@ -1305,14 +1306,14 @@ async def tts_stream_endpoint(
         try:
             yield first_chunk
             while True:
-                if await request.is_disconnected():
+                if await http_request.is_disconnected():
                     print("[TTS] Client disconnected during generation, aborting.")
                     break
                 chunk = await asyncio.to_thread(session.read_chunk)
                 if not chunk:
                     break
                 yield chunk
-            if not await request.is_disconnected():
+            if not await http_request.is_disconnected():
                 await asyncio.to_thread(session.finish)
         except AudioEncodingError as error:
             print(f"[ERROR] Stream encoding failed: {error}")
