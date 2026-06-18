@@ -3,7 +3,7 @@
 // @name:zh-CN   本地划词听译助手
 // @name:en      Local Selection Read & Translate
 // @namespace    https://github.com/Yan-ShiBo/local-tts-env
-// @version      1.11.2
+// @version      1.11.3
 // @description  选中文本即可本地朗读或翻译：Kokoro TTS 负责语音朗读，Ollama 模型负责本地翻译，文本不上传云端。
 // @description:en Select text on any page to read aloud locally with Kokoro TTS or translate locally through Ollama.
 // @author       Yan-ShiBo
@@ -499,6 +499,7 @@ const KokoroTTSCore = (() => {
     prepareTextForRead,
     prepareTextForReadPlan,
     releaseAudio,
+    replaceFormulaDelimiters,
     selectBlobAudioFormat,
     stripUnreadableReadText,
     supportsWebMOpus,
@@ -514,7 +515,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
 (function () {
   "use strict";
 
-  const MATH_SELECTOR = 'math, mjx-container, script[type^="math/tex"], .MathJax, [data-latex], [data-tex], [data-math], [data-mathml]';
+  const MATH_SELECTOR = 'math, mjx-container, script[type^="math/tex"], .MathJax, .katex, .katex-display, [data-latex], [data-tex], [data-math], [data-mathml]';
 
   // ════════════════════════════════════════════════════════
   //  Configuration
@@ -1527,6 +1528,20 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       .join(" ");
   }
 
+  function isKatexElement(element) {
+    return Boolean(
+      element &&
+      element.nodeType === 1 &&
+      element.classList &&
+      (element.classList.contains("katex") || element.classList.contains("katex-display"))
+    );
+  }
+
+  function closestKatexRoot(element) {
+    if (!element || element.nodeType !== 1 || !element.closest) return null;
+    return element.closest(".katex-display") || element.closest(".katex");
+  }
+
   function normalizeMathGlyphChar(char) {
     if (!char) return "";
     const cp = char.codePointAt(0);
@@ -1661,6 +1676,20 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       if (value) return value;
     }
 
+    if (isKatexElement(element) || (element.querySelector && element.querySelector(".katex-mathml, .katex-html"))) {
+      const katexRoot = closestKatexRoot(element) || element;
+      const mathMl = katexRoot.querySelector && katexRoot.querySelector(".katex-mathml math");
+      if (mathMl) {
+        const value = normalizeMathFormulaText(mathMlNodeToTex(mathMl));
+        if (value) return value;
+      }
+      const texAnnotation = katexRoot.querySelector && katexRoot.querySelector('annotation[encoding*="TeX"], annotation[encoding*="tex"], annotation[encoding*="latex"]');
+      if (texAnnotation) {
+        const value = normalizeMathFormulaText(texAnnotation.textContent);
+        if (value) return value;
+      }
+    }
+
     const aria = normalizeMathFormulaText(element.getAttribute("aria-label"));
     if (aria && !/^math$/i.test(aria)) return aria;
 
@@ -1673,6 +1702,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     if (tag === "math" || tag === "mjx-container") return true;
     if (tag === "script" && /^math\/tex/i.test(element.getAttribute("type") || "")) return true;
     if (element.classList && element.classList.contains("MathJax")) return true;
+    if (isKatexElement(element)) return true;
     return ["data-latex", "data-tex", "data-math", "data-mathml"].some((name) =>
       element.hasAttribute && element.hasAttribute(name)
     );
@@ -1702,6 +1732,23 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     const overlapArea = horizontal * vertical;
     const smallerArea = Math.min(a.width * a.height, b.width * b.height);
     return overlapArea / Math.max(smallerArea, 1) >= 0.08;
+  }
+
+  function rangeBoundaryIsInsideElement(range, element) {
+    return Boolean(
+      range &&
+      element &&
+      (element.contains(range.startContainer) || element.contains(range.endContainer))
+    );
+  }
+
+  function rangeLooksLikeMathOnly(range, mathEl) {
+    if (!range || !mathEl) return false;
+    const selected = String(range.toString() || "").replace(/\s+/g, "");
+    const mathText = String(mathEl.textContent || "").replace(/\s+/g, "");
+    if (!selected) return true;
+    if (!mathText) return selected.length <= 12;
+    return selected.length <= Math.max(12, Math.ceil(mathText.length * 0.55));
   }
 
   function serializeSelectionNode(node) {
@@ -1789,7 +1836,12 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
           if (mathEl.contains(newRange.endContainer)) {
             newRange.setEndAfter(mathEl);
           }
-          if (intersectsRect && !mathEl.contains(newRange.startContainer) && !mathEl.contains(newRange.endContainer)) {
+          if (
+            intersectsRect &&
+            !intersectsDom &&
+            !rangeBoundaryIsInsideElement(newRange, mathEl) &&
+            rangeLooksLikeMathOnly(range, mathEl)
+          ) {
             newRange.setStartBefore(mathEl);
             newRange.setEndAfter(mathEl);
           }

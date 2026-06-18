@@ -23,7 +23,7 @@ Keep the GitHub links in both places: metadata makes them appear in Greasy Fork'
 - MathJax/MathML/LaTeX 会优先提取语义公式；翻译结果保留公式符号，并附加专业中文描述
 - 如果朗读稿准备接口不可用，`Read` 会退回到 `/translate` 并指定翻译成 English 后再朗读
 - `Read` 和 `Translate` 可以同时进行；按钮行固定在选区下方，译文卡片会根据空间避让，减少遮挡正文
-- 只选中 MathJax/MathML 公式的一部分时，脚本会尽量扩展到完整公式框再送去翻译或朗读稿处理
+- 只选中 MathJax/MathML/KaTeX 公式的一部分时，脚本会尽量扩展到完整公式框；如果选中的是包含公式的一整句话，会保留公式前后的句子内容
 
 ## 重要：需要本地服务
 

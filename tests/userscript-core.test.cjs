@@ -295,6 +295,21 @@ test("simple formulas are verbalized by rule before TTS", () => {
 });
 
 
+test("formula replacement preserves surrounding sentence text", () => {
+  const { replaceFormulaDelimiters } = require("../tts-userscript.js");
+  const formulas = [];
+  const prepared = replaceFormulaDelimiters(
+    "If fitting loss is used, then $\\hat{B}(x)$ is only a neural approximation.",
+    formulas
+  );
+
+  assert.match(prepared, /^If fitting loss is used, then /);
+  assert.match(prepared, /formula:/);
+  assert.match(prepared, / is only a neural approximation\.$/);
+  assert.equal(formulas.length, 0);
+});
+
+
 test("complex formulas are collected for LLM verbalization fallback", () => {
   const { applyFormulaVerbalizations, prepareTextForReadPlan } = require("../tts-userscript.js");
   const prepared = prepareTextForReadPlan("Use $$\\begin{matrix} a & b \\\\ c & d \\end{matrix}$$ here.");
