@@ -60,8 +60,8 @@ http://127.0.0.1:5000
 http://127.0.0.1:5000/health
 ```
 
-如果打不开，先运行项目里的 `start.bat` 或托盘启动器。
-新版 `start.bat` 和 `Kokoro TTS.pyw` 会直接定位 `kokoro-tts` 环境里的 Python，不需要先执行 `conda init`。
+如果打不开，先运行项目里的 `start.bat` 或推荐的托盘启动器 `Kokoro TTS.bat`。
+新版 `start.bat` 和 `Kokoro TTS.bat` 会直接定位 `kokoro-tts` 环境里的 Python，不需要先执行 `conda init`；`Kokoro TTS.pyw` 只在 Windows 已有关联 `.pyw` 到 Python 时适合双击。
 
 ### 翻译健康检测失败
 

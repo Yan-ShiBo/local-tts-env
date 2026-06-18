@@ -43,7 +43,7 @@ from windows_startup import (
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 SERVER_SCRIPT = SCRIPT_DIR / "server.py"
-TRAY_LAUNCHER = SCRIPT_DIR / "Kokoro TTS.pyw"
+TRAY_LAUNCHER = SCRIPT_DIR / "Kokoro TTS.bat"
 SETTINGS_FILE = SCRIPT_DIR / "tray_settings.json"
 CONDA_ENV_NAME = "kokoro-tts"
 APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", SCRIPT_DIR)) / "KokoroTTS"

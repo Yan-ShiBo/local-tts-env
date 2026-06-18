@@ -74,12 +74,12 @@ pip install -r requirements.txt
 ### 3. Start the Server
 
 **Option A: System tray app** (recommended)
-- Double-click `Kokoro TTS.pyw` — runs silently in the system tray
+- Double-click `Kokoro TTS.bat` — starts the tray app without relying on Windows `.pyw` file associations
 
 **Option B: Terminal mode**
 - Double-click `start.bat` — shows a console window with logs
 
-Both launchers locate the `kokoro-tts` Conda environment Python directly, so normal startup does not require `conda init`.
+Both `.bat` launchers locate the `kokoro-tts` Conda environment Python directly, so normal startup does not require `conda init`. `Kokoro TTS.pyw` is kept as a no-console Python launcher, but it only works by double-click when Windows has a `.pyw` file association.
 
 For local translation, install [Ollama](https://ollama.com/) and pull a model:
 
@@ -129,6 +129,7 @@ browser script and built-in test page are generated from this catalog.
 | `audio_encoding.py` | Bundled FFmpeg helpers for OGG/Opus and WebM/Opus |
 | `tray_app.py` | System tray application (background mode) |
 | `windows_startup.py` | Windows Startup shortcut management for tray auto-start |
+| `Kokoro TTS.bat` | Recommended tray launcher; does not require `.pyw` file association |
 | `Kokoro TTS.pyw` | No-console launcher for tray app |
 | `tts-userscript.js` | Tampermonkey script for local selection read-aloud and translation |
 | `docs/greasyfork-additional-info.md` | Markdown content for the Greasy Fork additional info field |
