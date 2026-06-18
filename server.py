@@ -11,13 +11,17 @@ server.py — Kokoro TTS 本地 API 服务器
 
 import asyncio
 import io
+import json
 import math
 import os
+import re
 import sys
 import threading
 import time
 import warnings
 from typing import Optional
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 # Suppress harmless PyTorch / HuggingFace warnings
 warnings.filterwarnings("ignore", message="dropout option adds dropout")
@@ -70,6 +74,9 @@ FADE_MS = int(os.environ.get("KOKORO_FADE_MS", "0"))
 WARMUP_ENABLED = os.environ.get("KOKORO_WARMUP", "1") != "0"
 SUPPORTED_AUDIO_FORMATS = {"wav", "ogg"}
 STREAM_CHUNK_BYTES = 16384
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_TRANSLATE_MODEL = os.environ.get("OLLAMA_TRANSLATE_MODEL", "qwen3:14b")
+OLLAMA_TRANSLATE_TIMEOUT = float(os.environ.get("OLLAMA_TRANSLATE_TIMEOUT", "90"))
 
 if VOICE not in AVAILABLE_VOICES:
     raise ValueError(f"Unsupported KOKORO_VOICE: {VOICE}")
@@ -77,6 +84,8 @@ if not math.isfinite(DEFAULT_SPEED) or not 0.5 <= DEFAULT_SPEED <= 2.0:
     raise ValueError("KOKORO_SPEED must be a finite number between 0.5 and 2.0")
 if SEGMENT_SILENCE_MS < 0 or FADE_MS < 0:
     raise ValueError("Audio timing values cannot be negative")
+if OLLAMA_TRANSLATE_TIMEOUT <= 0:
+    raise ValueError("OLLAMA_TRANSLATE_TIMEOUT must be positive")
 
 # ════════════════════════════════════════════════════════════════
 #  全局变量
@@ -181,7 +190,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Kokoro TTS 本地服务",
     description="本地运行的高质量英文 TTS 服务（Kokoro 82M）",
-    version="1.2.0",
+    version="1.4.0",
     lifespan=lifespan,
 )
 
@@ -220,6 +229,55 @@ class TTSRequest(BaseModel):
 # ════════════════════════════════════════════════════════════════
 #  推理逻辑
 # ════════════════════════════════════════════════════════════════
+
+class TranslateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(max_length=12000)
+    model: Optional[str] = Field(default=None, max_length=120)
+    target_language: Optional[str] = Field(default="Simplified Chinese", max_length=80)
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, value):
+        if value is None:
+            return value
+        model = value.strip()
+        if not model:
+            raise ValueError("model cannot be blank")
+        if any(ch.isspace() for ch in model):
+            raise ValueError("model cannot contain whitespace")
+        return model
+
+    @field_validator("target_language")
+    @classmethod
+    def validate_target_language(cls, value):
+        if value is None:
+            return "Simplified Chinese"
+        target_language = value.strip()
+        if not target_language:
+            raise ValueError("target_language cannot be blank")
+        return target_language
+
+
+class TranslateResponse(BaseModel):
+    text: str
+    translated_text: str
+    model: str
+    target_language: str
+    elapsed: float
+
+
+class TranslateHealthResponse(BaseModel):
+    status: str
+    ollama_reachable: bool
+    model: str
+    model_available: bool
+    model_running: bool
+    available_models: list[str]
+    running_models: list[str]
+    error: Optional[str] = None
+
 
 def _apply_fade(audio: np.ndarray, sample_rate: int, fade_ms: int) -> np.ndarray:
     """Apply a short fade at both ends without mutating the input."""
@@ -318,6 +376,93 @@ def _audio_response(wav: np.ndarray, sample_rate: int, audio_format: str) -> Res
         media_type="audio/wav",
         headers={"Content-Disposition": 'inline; filename="speech.wav"'},
     )
+
+
+def _clean_translation_response(text: str) -> str:
+    cleaned = re.sub(r"(?is)<think>.*?</think>", "", text or "").strip()
+    if cleaned.startswith("```") and cleaned.endswith("```"):
+        lines = cleaned.splitlines()
+        if len(lines) >= 2:
+            cleaned = "\n".join(lines[1:-1]).strip()
+    return cleaned.strip().strip('"').strip()
+
+
+def _call_ollama_json(path: str, timeout: float = 5.0):
+    req = urllib_request.Request(
+        f"{OLLAMA_BASE_URL}{path}",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib_error.HTTPError as error:
+        raise RuntimeError(f"Ollama returned HTTP {error.code}") from error
+    except urllib_error.URLError as error:
+        raise RuntimeError("Cannot connect to Ollama") from error
+    except TimeoutError as error:
+        raise RuntimeError("Ollama request timed out") from error
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Ollama returned invalid JSON") from error
+
+
+def _ollama_model_names(payload) -> list[str]:
+    names = []
+    for item in payload.get("models", []) if isinstance(payload, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("model")
+        if isinstance(name, str) and name:
+            names.append(name)
+    return names
+
+
+def _call_ollama_translate(text: str, model: str, target_language: str) -> str:
+    payload = {
+        "model": model,
+        "stream": False,
+        "system": (
+            "You are a precise translation engine. Translate the user's text "
+            f"into {target_language}. Preserve meaning, names, numbers, URLs, "
+            "markdown, and code. Return only the translated text, with no "
+            "reasoning, notes, or explanations."
+        ),
+        "prompt": text,
+        "options": {
+            "temperature": 0.1,
+            "top_p": 0.9,
+        },
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib_request.Request(
+        f"{OLLAMA_BASE_URL}/api/generate",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(req, timeout=OLLAMA_TRANSLATE_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib_error.HTTPError as error:
+        raise RuntimeError(f"Ollama returned HTTP {error.code}") from error
+    except urllib_error.URLError as error:
+        raise RuntimeError("Cannot connect to Ollama") from error
+    except TimeoutError as error:
+        raise RuntimeError("Ollama translation timed out") from error
+
+    try:
+        response_payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Ollama returned invalid JSON") from error
+
+    translated = _clean_translation_response(response_payload.get("response", ""))
+    if not translated:
+        raise RuntimeError("Ollama returned an empty translation")
+    return translated
 
 
 def _stream_segment_with_fade(
@@ -516,6 +661,78 @@ class TTSStreamSession:
 #  API 端点
 # ════════════════════════════════════════════════════════════════
 
+@app.get("/translate/health", response_model=TranslateHealthResponse)
+async def translate_health(model: Optional[str] = None):
+    """Report whether Ollama is reachable and the selected model is loaded."""
+    selected_model = (model or OLLAMA_TRANSLATE_MODEL).strip() or OLLAMA_TRANSLATE_MODEL
+    try:
+        available_models = _ollama_model_names(_call_ollama_json("/api/tags"))
+        try:
+            running_models = _ollama_model_names(_call_ollama_json("/api/ps"))
+        except RuntimeError:
+            running_models = []
+        model_available = selected_model in available_models
+        model_running = selected_model in running_models
+        status = "running" if model_running else "available" if model_available else "missing"
+        return TranslateHealthResponse(
+            status=status,
+            ollama_reachable=True,
+            model=selected_model,
+            model_available=model_available,
+            model_running=model_running,
+            available_models=available_models,
+            running_models=running_models,
+        )
+    except Exception as error:
+        print(f"[ERROR] Ollama health check failed: {error}")
+        return TranslateHealthResponse(
+            status="error",
+            ollama_reachable=False,
+            model=selected_model,
+            model_available=False,
+            model_running=False,
+            available_models=[],
+            running_models=[],
+            error="Cannot connect to Ollama",
+        )
+
+
+@app.post("/translate", response_model=TranslateResponse)
+async def translate_endpoint(request: TranslateRequest):
+    """Translate text through the local Ollama API."""
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    model = request.model or OLLAMA_TRANSLATE_MODEL
+    target_language = request.target_language or "Simplified Chinese"
+
+    try:
+        t0 = time.perf_counter()
+        translated_text = await asyncio.to_thread(
+            _call_ollama_translate,
+            text,
+            model,
+            target_language,
+        )
+        elapsed = time.perf_counter() - t0
+        print(
+            f"[TRANSLATE] {len(text)} chars -> {len(translated_text)} chars, "
+            f"model={model}, took {elapsed:.2f}s"
+        )
+    except Exception as error:
+        print(f"[ERROR] Translation failed: {error}")
+        raise HTTPException(status_code=502, detail="Local Ollama translation failed")
+
+    return TranslateResponse(
+        text=text,
+        translated_text=translated_text,
+        model=model,
+        target_language=target_language,
+        elapsed=round(elapsed, 3),
+    )
+
+
 @app.post(
     "/tts",
     response_class=Response,
@@ -699,6 +916,8 @@ async def health_check():
         ),
         "default_voice": VOICE,
         "default_speed": DEFAULT_SPEED,
+        "ollama_base_url": OLLAMA_BASE_URL,
+        "default_translate_model": OLLAMA_TRANSLATE_MODEL,
     }
 
 

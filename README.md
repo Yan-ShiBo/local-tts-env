@@ -17,7 +17,8 @@
 - **Small audio payloads** — `/tts` can return OGG/Opus with `Accept: audio/ogg` or `?format=ogg`; WAV remains the default for compatibility
 - **17 voices** — American male/female + British female, easily switchable
 - **System tray app** — Runs silently in the background, right-click to control, with optional login auto-start
-- **Browser settings panel** — Change voice & speed from a floating gear icon
+- **Browser settings panel** — Change voice, speed and translation model from a floating gear icon
+- **Local translation** — Select text and translate it locally through Ollama (`qwen3:14b` by default, switchable to `translategemma:4b` or a custom local model)
 - **Playback progress** — Floating button shows a horizontal progress fill; streaming mode shows played seconds until final duration is known
 - **GPU-accelerated** — Near real-time inference on NVIDIA GPUs
 - **Fully offline** — No internet required after initial model download (~200MB)
@@ -72,6 +73,16 @@ pip install -r requirements.txt
 
 **Option B: Terminal mode**
 - Double-click `start.bat` — shows a console window with logs
+
+For local translation, install [Ollama](https://ollama.com/) and pull a model:
+
+```powershell
+ollama pull qwen3:14b
+# optional faster model
+ollama pull translategemma:4b
+```
+
+The default translation model is `qwen3:14b`. Override it with `OLLAMA_TRANSLATE_MODEL`, or change it in the browser settings panel. The settings panel separates TTS and Translation controls, shows whether the selected Ollama model is installed/running, and includes a translation test button.
 
 ### 4. Install the Browser Script
 
@@ -128,6 +139,22 @@ Returns `audio/wav` by default. Use `Accept: audio/ogg` or `?format=ogg` for OGG
 ```
 
 Returns `audio/webm; codecs="opus"` as a continuous stream for MediaSource playback.
+
+### `POST /translate`
+
+```json
+{
+  "text": "Hello, how are you?",
+  "target_language": "Simplified Chinese",
+  "model": "qwen3:14b"
+}
+```
+
+Returns JSON with `translated_text`, `model`, `target_language` and `elapsed`.
+
+### `GET /translate/health?model=qwen3:14b`
+
+Checks local Ollama without starting a generation. Returns whether Ollama is reachable, whether the model is installed, and whether it is currently running.
 
 ### `GET /health` — Server status
 ### `GET /voices` — Available voices

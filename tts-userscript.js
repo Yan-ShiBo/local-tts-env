@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kokoro TTS 划词朗读
 // @namespace    https://github.com/Yan-ShiBo/local-tts-env
-// @version      1.4.3
+// @version      1.6.0
 // @description  选中英文文本，一键使用本地 Kokoro TTS 进行高质量朗读
 // @author       Yan-ShiBo
 // @match        *://*/*
@@ -316,6 +316,8 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   const API_ORIGIN = new URL(API_BASE).origin;
   const API_URL = API_BASE + "/tts";
   const API_STREAM_URL = API_BASE + "/tts/stream";
+  const API_TRANSLATE_URL = API_BASE + "/translate";
+  const API_TRANSLATE_HEALTH_URL = API_BASE + "/translate/health";
   const SHORTCUT = { ctrl: true, shift: true, key: "S" }; // Ctrl+Shift+S
 
   /* CATALOG:START */
@@ -326,6 +328,8 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   const DEFAULTS = {
     voice: TTS_CATALOG.default_voice,
     speed: TTS_CATALOG.default_speed,
+    translateModel: "qwen3:14b",
+    targetLanguage: "Simplified Chinese",
   };
 
   const VOICES = TTS_CATALOG.groups.map((group) => ({
@@ -341,6 +345,14 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     label: `${value}x${value === DEFAULTS.speed ? " (default)" : ""}`,
   }));
 
+  const TRANSLATION_MODELS = [
+    { value: "qwen3:14b", label: "qwen3:14b - accurate" },
+    { value: "translategemma:4b", label: "translategemma:4b - fast" },
+    { value: "qwen3:4b", label: "qwen3:4b - lightweight" },
+    { value: "glm4:9b", label: "glm4:9b" },
+    { value: "zhou-xingmei:latest", label: "zhou-xingmei:latest" },
+  ];
+
   // ════════════════════════════════════════════════════════
   //  State
   // ════════════════════════════════════════════════════════
@@ -348,7 +360,9 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   let floatingBtn = null;
   let currentAudio = null;
   const requestGate = KokoroTTSCore.createRequestGate();
+  const translationGate = KokoroTTSCore.createRequestGate();
   let isLoading = false;
+  let isTranslating = false;
   let settingsPanel = null;
   let settingsVisible = false;
 
@@ -360,9 +374,19 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
         group.voices.some((voice) => voice.id === saved.voice)
       );
       const speedExists = SPEEDS.some((speed) => speed.value === saved.speed);
+      const translateModel =
+        typeof saved.translateModel === "string" && saved.translateModel.trim()
+          ? saved.translateModel.trim()
+          : DEFAULTS.translateModel;
+      const targetLanguage =
+        typeof saved.targetLanguage === "string" && saved.targetLanguage.trim()
+          ? saved.targetLanguage.trim()
+          : DEFAULTS.targetLanguage;
       return {
         voice: voiceExists ? saved.voice : DEFAULTS.voice,
         speed: speedExists ? saved.speed : DEFAULTS.speed,
+        translateModel,
+        targetLanguage,
       };
     } catch { return { ...DEFAULTS }; }
   }
@@ -377,6 +401,15 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
 
   let settings = loadSettings();
 
+  function escapeHtml(value) {
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   // ════════════════════════════════════════════════════════
   //  Styles
   // ════════════════════════════════════════════════════════
@@ -390,6 +423,12 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       animation: tts-fade-in 0.2s ease-out;
     }
 
+    .tts-float-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
     @keyframes tts-fade-in {
       from { opacity: 0; transform: translateY(6px) scale(0.92); }
       to   { opacity: 1; transform: translateY(0) scale(1); }
@@ -401,7 +440,8 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     }
 
     /* -- Main button -- */
-    .tts-speak-btn {
+    .tts-speak-btn,
+    .tts-translate-btn {
       position: relative;
       display: inline-flex;
       align-items: center;
@@ -424,6 +464,12 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       line-height: 1;
       overflow: hidden;
       --tts-progress: 0%;
+    }
+
+    .tts-translate-btn {
+      background: linear-gradient(135deg, #0f9b8e 0%, #2f80ed 100%);
+      box-shadow: 0 4px 15px rgba(47, 128, 237, 0.32),
+                  0 1px 3px rgba(0, 0, 0, 0.15);
     }
 
     .tts-speak-btn.with-progress::before {
@@ -458,23 +504,27 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       to   { left: 100%; }
     }
 
-    .tts-speak-btn:hover {
+    .tts-speak-btn:hover,
+    .tts-translate-btn:hover {
       transform: translateY(-1px);
       box-shadow: 0 6px 20px rgba(102, 126, 234, 0.55),
                   0 2px 6px rgba(0, 0, 0, 0.2);
     }
 
-    .tts-speak-btn:active {
+    .tts-speak-btn:active,
+    .tts-translate-btn:active {
       transform: translateY(0);
     }
 
     /* -- Loading state -- */
-    .tts-speak-btn.loading {
+    .tts-speak-btn.loading,
+    .tts-translate-btn.loading {
       background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
       cursor: pointer;
     }
 
-    .tts-speak-btn.loading .tts-icon {
+    .tts-speak-btn.loading .tts-icon,
+    .tts-translate-btn.loading .tts-icon {
       animation: tts-pulse 1s ease-in-out infinite;
     }
 
@@ -499,8 +549,57 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     }
 
     /* -- Error state -- */
-    .tts-speak-btn.error {
+    .tts-speak-btn.error,
+    .tts-translate-btn.error {
       background: linear-gradient(135deg, #fc5c7d 0%, #6a82fb 100%);
+    }
+
+    .tts-translate-btn:hover {
+      box-shadow: 0 6px 20px rgba(47, 128, 237, 0.48),
+                  0 2px 6px rgba(0, 0, 0, 0.2);
+    }
+
+    .tts-translation-card {
+      box-sizing: border-box;
+      width: min(420px, calc(100vw - 24px));
+      margin-top: 8px;
+      padding: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      background: rgba(20, 24, 34, 0.96);
+      color: #e8eef7;
+      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.35);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      line-height: 1.55;
+    }
+
+    .tts-translation-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+      color: #8ea3bd;
+      font-size: 11px;
+    }
+
+    .tts-copy-translation-btn {
+      flex: 0 0 auto;
+      padding: 4px 8px;
+      border: 1px solid rgba(47, 128, 237, 0.35);
+      border-radius: 7px;
+      background: rgba(47, 128, 237, 0.12);
+      color: #b8d4ff;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .tts-translation-text {
+      max-height: 260px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 14px;
     }
 
     /* -- Icon -- */
@@ -548,7 +647,8 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       bottom: 70px;
       right: 20px;
       z-index: 2147483646;
-      width: 280px;
+      width: 640px;
+      max-width: calc(100vw - 40px);
       background: #1a1a2e;
       border: 1px solid rgba(255,255,255,0.1);
       border-radius: 16px;
@@ -573,6 +673,58 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       -webkit-text-fill-color: transparent;
     }
 
+    .tts-settings-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .tts-settings-column {
+      min-width: 0;
+    }
+
+    .tts-settings-column h4 {
+      margin: 0 0 10px 0;
+      font-size: 12px;
+      font-weight: 700;
+      color: #c7d0ff;
+      letter-spacing: 0;
+    }
+
+    .tts-settings-status {
+      min-height: 34px;
+      padding: 9px 10px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      font-size: 12px;
+      line-height: 1.35;
+      color: #888;
+    }
+
+    .tts-settings-panel .tts-test-output {
+      min-height: 42px;
+      margin-top: 10px;
+      padding: 9px 10px;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: #c9d5e8;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 120px;
+      overflow: auto;
+    }
+
+    @media (max-width: 680px) {
+      .tts-settings-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
     .tts-settings-panel label {
       display: block;
       font-size: 12px;
@@ -585,7 +737,8 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       margin-top: 0;
     }
 
-    .tts-settings-panel select {
+    .tts-settings-panel select,
+    .tts-settings-panel input[type="text"] {
       width: 100%;
       padding: 8px 10px;
       background: rgba(255,255,255,0.06);
@@ -599,7 +752,13 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       -webkit-appearance: none;
     }
 
-    .tts-settings-panel select:focus {
+    .tts-settings-panel input[type="text"] {
+      box-sizing: border-box;
+      cursor: text;
+    }
+
+    .tts-settings-panel select:focus,
+    .tts-settings-panel input[type="text"]:focus {
       border-color: #667eea;
     }
 
@@ -670,6 +829,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     .tts-settings-panel .tts-status-dot.online { background: #38ef7d; }
     .tts-settings-panel .tts-status-dot.offline { background: #f5576c; }
     .tts-settings-panel .tts-status-dot.checking { background: #f0c040; }
+    .tts-settings-panel .tts-status-dot.warning { background: #f0c040; }
   `);
 
   // ════════════════════════════════════════════════════════
@@ -698,17 +858,51 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       speedOptions += `<option value="${s.value}"${sel}>${s.label}</option>`;
     }
 
+    let translateModelOptions = "";
+    const hasSavedTranslateModel = TRANSLATION_MODELS.some(
+      (model) => model.value === settings.translateModel
+    );
+    for (const model of TRANSLATION_MODELS) {
+      const sel = model.value === settings.translateModel ? " selected" : "";
+      translateModelOptions +=
+        `<option value="${escapeHtml(model.value)}"${sel}>${escapeHtml(model.label)}</option>`;
+    }
+    if (!hasSavedTranslateModel) {
+      translateModelOptions +=
+        `<option value="${escapeHtml(settings.translateModel)}" selected>Custom: ${escapeHtml(settings.translateModel)}</option>`;
+    }
+
     panel.innerHTML = `
       <h3>Kokoro TTS Settings</h3>
-      <div style="font-size:12px;margin-bottom:12px;">
-        <span class="tts-status-dot checking" id="tts-status-dot"></span>
-        <span id="tts-status-text" style="color:#888;">Checking...</span>
+      <div class="tts-settings-grid">
+        <div class="tts-settings-column">
+          <h4>TTS</h4>
+          <div class="tts-settings-status">
+            <span class="tts-status-dot checking" id="tts-status-dot"></span>
+            <span id="tts-status-text">Checking...</span>
+          </div>
+          <label>Voice</label>
+          <select id="tts-voice-select">${voiceOptions}</select>
+          <label>Speed</label>
+          <select id="tts-speed-select">${speedOptions}</select>
+          <button class="tts-test-btn" id="tts-test-btn">Test: "Hello, nice to meet you!"</button>
+        </div>
+        <div class="tts-settings-column">
+          <h4>Translation</h4>
+          <div class="tts-settings-status">
+            <span class="tts-status-dot checking" id="tts-translate-status-dot"></span>
+            <span id="tts-translate-status-text">Checking model...</span>
+          </div>
+          <label>Translate model</label>
+          <select id="tts-translate-model-select">${translateModelOptions}</select>
+          <label>Custom model</label>
+          <input type="text" id="tts-translate-model-input" value="${escapeHtml(settings.translateModel)}" spellcheck="false">
+          <label>Target language</label>
+          <input type="text" id="tts-target-language-input" value="${escapeHtml(settings.targetLanguage)}" spellcheck="false">
+          <button class="tts-test-btn" id="tts-translate-test-btn">Test translation</button>
+          <div class="tts-test-output" id="tts-translate-test-output">No translation test yet.</div>
+        </div>
       </div>
-      <label>Voice</label>
-      <select id="tts-voice-select">${voiceOptions}</select>
-      <label>Speed</label>
-      <select id="tts-speed-select">${speedOptions}</select>
-      <button class="tts-test-btn" id="tts-test-btn">Test: "Hello, nice to meet you!"</button>
     `;
 
     document.body.appendChild(panel);
@@ -725,13 +919,50 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       saveSettings(settings);
     });
 
+    panel.querySelector("#tts-translate-model-select").addEventListener("change", (e) => {
+      settings.translateModel = e.target.value.trim() || DEFAULTS.translateModel;
+      const input = panel.querySelector("#tts-translate-model-input");
+      if (input) input.value = settings.translateModel;
+      saveSettings(settings);
+      checkTranslationStatus();
+    });
+
+    panel.querySelector("#tts-translate-model-input").addEventListener("change", (e) => {
+      settings.translateModel = e.target.value.trim() || DEFAULTS.translateModel;
+      e.target.value = settings.translateModel;
+      const select = panel.querySelector("#tts-translate-model-select");
+      if (select) {
+        let option = Array.from(select.options).find(
+          (item) => item.value === settings.translateModel
+        );
+        if (!option) {
+          option = new Option(`Custom: ${settings.translateModel}`, settings.translateModel);
+          select.appendChild(option);
+        }
+        select.value = settings.translateModel;
+      }
+      saveSettings(settings);
+      checkTranslationStatus();
+    });
+
+    panel.querySelector("#tts-target-language-input").addEventListener("change", (e) => {
+      settings.targetLanguage = e.target.value.trim() || DEFAULTS.targetLanguage;
+      e.target.value = settings.targetLanguage;
+      saveSettings(settings);
+    });
+
     panel.querySelector("#tts-test-btn").addEventListener("click", (e) => {
       const testText = "Hello, nice to meet you! This is a test of the Kokoro text to speech system.";
       speak(testText, e.currentTarget);
     });
 
+    panel.querySelector("#tts-translate-test-btn").addEventListener("click", (e) => {
+      testTranslation(e.currentTarget);
+    });
+
     // Check server status
     checkServerStatus();
+    checkTranslationStatus();
   }
 
   function checkServerStatus() {
@@ -765,6 +996,153 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
         text.style.color = "#e57373";
       },
     });
+  }
+
+  function syncInstalledTranslationModels(models) {
+    const select = document.getElementById("tts-translate-model-select");
+    if (!select || !Array.isArray(models)) return;
+    for (const model of models) {
+      if (typeof model !== "string" || !model.trim()) continue;
+      if (Array.from(select.options).some((option) => option.value === model)) {
+        continue;
+      }
+      select.appendChild(new Option(`Installed: ${model}`, model));
+    }
+    select.value = settings.translateModel;
+  }
+
+  function checkTranslationStatus() {
+    const dot = document.getElementById("tts-translate-status-dot");
+    const text = document.getElementById("tts-translate-status-text");
+    if (!dot || !text) return;
+
+    dot.className = "tts-status-dot checking";
+    text.textContent = "Checking model...";
+    text.style.color = "#f0c040";
+
+    GM_xmlhttpRequest({
+      method: "GET",
+      url: `${API_TRANSLATE_HEALTH_URL}?model=${encodeURIComponent(settings.translateModel)}`,
+      timeout: 5000,
+      onload: (resp) => {
+        if (resp.status !== 200) {
+          dot.className = "tts-status-dot offline";
+          text.textContent = "Translation health check failed";
+          text.style.color = "#e57373";
+          return;
+        }
+        let payload = null;
+        try {
+          payload = JSON.parse(resp.responseText || "{}");
+        } catch {
+          dot.className = "tts-status-dot offline";
+          text.textContent = "Invalid translation status";
+          text.style.color = "#e57373";
+          return;
+        }
+
+        if (!payload.ollama_reachable) {
+          dot.className = "tts-status-dot offline";
+          text.textContent = "Ollama offline";
+          text.style.color = "#e57373";
+        } else if (payload.model_running) {
+          syncInstalledTranslationModels(payload.available_models);
+          dot.className = "tts-status-dot online";
+          text.textContent = `${payload.model} running`;
+          text.style.color = "#81c784";
+        } else if (payload.model_available) {
+          syncInstalledTranslationModels(payload.available_models);
+          dot.className = "tts-status-dot warning";
+          text.textContent = `${payload.model} installed, not loaded`;
+          text.style.color = "#f0c040";
+        } else {
+          syncInstalledTranslationModels(payload.available_models);
+          dot.className = "tts-status-dot offline";
+          text.textContent = `${payload.model} not installed`;
+          text.style.color = "#e57373";
+        }
+      },
+      onerror: () => {
+        dot.className = "tts-status-dot offline";
+        text.textContent = "Server offline - run start.bat";
+        text.style.color = "#e57373";
+      },
+      ontimeout: () => {
+        dot.className = "tts-status-dot offline";
+        text.textContent = "Translation status timeout";
+        text.style.color = "#e57373";
+      },
+    });
+  }
+
+  async function testTranslation(btnElement) {
+    if (btnElement && btnElement.classList.contains("loading")) {
+      cancelTranslationRequest();
+      setButtonHtml(
+        btnElement,
+        "tts-test-btn",
+        "\uD83C\uDF10",
+        "Test translation"
+      );
+      return;
+    }
+
+    const output = document.getElementById("tts-translate-test-output");
+    if (output) {
+      output.textContent = "Translating...";
+      output.style.color = "#f0c040";
+    }
+
+    isTranslating = true;
+    const generation = translationGate.begin();
+    if (btnElement) {
+      setButtonHtml(
+        btnElement,
+        "tts-test-btn loading",
+        "\u23F9",
+        "Cancel"
+      );
+    }
+
+    try {
+      const payload = await fetchTranslation(
+        "Hello, nice to meet you!",
+        generation
+      );
+      if (!translationGate.isCurrent(generation)) return;
+      if (output) {
+        output.textContent = payload.translated_text || "";
+        output.style.color = "#c9d5e8";
+      }
+      if (btnElement) {
+        setButtonHtml(
+          btnElement,
+          "tts-test-btn",
+          "\u2705",
+          "Translation OK"
+        );
+      }
+      checkTranslationStatus();
+    } catch (err) {
+      if (!translationGate.isCurrent(generation)) return;
+      if (output) {
+        output.textContent = err.message || "Translation failed";
+        output.style.color = "#e57373";
+      }
+      if (btnElement) {
+        setButtonHtml(
+          btnElement,
+          "tts-test-btn error",
+          "\u274C",
+          "Translation failed"
+        );
+      }
+    } finally {
+      if (translationGate.isCurrent(generation)) {
+        translationGate.finish(generation);
+        isTranslating = false;
+      }
+    }
   }
 
   function toggleSettings() {
@@ -808,6 +1186,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   }
 
   function removeButton() {
+    cancelTranslationRequest();
     if (floatingBtn) {
       floatingBtn.style.animation = "tts-fade-out 0.15s ease-in forwards";
       const btn = floatingBtn;
@@ -828,6 +1207,11 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     isLoading = false;
   }
 
+  function cancelTranslationRequest() {
+    translationGate.cancel();
+    isTranslating = false;
+  }
+
   function removeSpecificButton(container) {
     if (!container || !container.isConnected) return;
     container.style.animation = "tts-fade-out 0.15s ease-in forwards";
@@ -840,10 +1224,13 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   function showButton(x, y, text) {
     removeButton();
     cancelRequest();
+    cancelTranslationRequest();
     stopAudio();
 
     const container = document.createElement("div");
     container.className = "tts-float-container";
+    const actions = document.createElement("div");
+    actions.className = "tts-float-actions";
 
     const btn = document.createElement("button");
     btn.className = "tts-speak-btn";
@@ -874,7 +1261,32 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       speak(text, btn);
     });
 
-    container.appendChild(btn);
+    const translateBtn = document.createElement("button");
+    translateBtn.className = "tts-translate-btn";
+    translateBtn.innerHTML = '<span class="tts-icon">\uD83C\uDF10</span><span class="tts-label">Translate</span>';
+
+    translateBtn.addEventListener("click", (e) => {
+      if (!e.isTrusted) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (translateBtn.classList.contains("loading")) {
+        cancelTranslationRequest();
+        setButtonHtml(
+          translateBtn,
+          "tts-translate-btn",
+          "\uD83C\uDF10",
+          "Translate"
+        );
+        return;
+      }
+
+      translateSelectedText(text, translateBtn, container);
+    });
+
+    actions.appendChild(btn);
+    actions.appendChild(translateBtn);
+    container.appendChild(actions);
 
     const scrollX = window.scrollX || document.documentElement.scrollLeft;
     const scrollY = window.scrollY || document.documentElement.scrollTop;
@@ -900,9 +1312,13 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   function getButtonBaseClass(btnElement) {
     if (!btnElement) return "tts-speak-btn";
     if (!btnElement.dataset.ttsBaseClass) {
-      btnElement.dataset.ttsBaseClass = btnElement.classList.contains("tts-test-btn")
-        ? "tts-test-btn"
-        : "tts-speak-btn";
+      if (btnElement.classList.contains("tts-test-btn")) {
+        btnElement.dataset.ttsBaseClass = "tts-test-btn";
+      } else if (btnElement.classList.contains("tts-translate-btn")) {
+        btnElement.dataset.ttsBaseClass = "tts-translate-btn";
+      } else {
+        btnElement.dataset.ttsBaseClass = "tts-speak-btn";
+      }
     }
     return btnElement.dataset.ttsBaseClass;
   }
@@ -912,7 +1328,12 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     const baseClass = getButtonBaseClass(btnElement);
     const stateClasses = className
       .split(/\s+/)
-      .filter((name) => name && name !== "tts-speak-btn" && name !== "tts-test-btn");
+      .filter((name) =>
+        name &&
+        name !== "tts-speak-btn" &&
+        name !== "tts-test-btn" &&
+        name !== "tts-translate-btn"
+      );
     btnElement.className = [baseClass, ...stateClasses].join(" ");
     btnElement.style.removeProperty("--tts-progress");
     btnElement.innerHTML =
@@ -1074,6 +1495,164 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       });
       requestGate.attach(generation, request);
     });
+  }
+
+  async function fetchTranslation(text, generation) {
+    return new Promise((resolve, reject) => {
+      const request = GM_xmlhttpRequest({
+        method: "POST",
+        url: API_TRANSLATE_URL,
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+        },
+        data: JSON.stringify({
+          text,
+          model: settings.translateModel,
+          target_language: settings.targetLanguage,
+        }),
+        responseType: "json",
+        timeout: 120000,
+        onload: (response) => {
+          if (!translationGate.isCurrent(generation)) return;
+          if (response.status >= 200 && response.status < 300) {
+            try {
+              const payload = response.response || JSON.parse(response.responseText || "{}");
+              resolve(payload);
+            } catch (error) {
+              reject(error);
+            }
+          } else {
+            let detail = response.statusText || "Translation failed";
+            try {
+              const payload = JSON.parse(response.responseText || "{}");
+              if (payload.detail) detail = payload.detail;
+            } catch {}
+            reject(new Error(`Server returned ${response.status}: ${detail}`));
+          }
+        },
+        onerror: () => {
+          if (!translationGate.isCurrent(generation)) return;
+          reject(new Error("Cannot connect to local TTS server. Run start.bat first."));
+        },
+        ontimeout: () => {
+          if (!translationGate.isCurrent(generation)) return;
+          reject(new Error("Translation timeout. Try a shorter selection or a faster model."));
+        },
+        onabort: () => reject(new Error("Translation cancelled.")),
+      });
+      translationGate.attach(generation, request);
+    });
+  }
+
+  function removeTranslationCard(container) {
+    if (!container) return;
+    const card = container.querySelector(".tts-translation-card");
+    if (card) card.remove();
+  }
+
+  function copyTextToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.left = "-9999px";
+    area.setAttribute("readonly", "");
+    document.body.appendChild(area);
+    area.select();
+    try {
+      document.execCommand("copy");
+      return Promise.resolve();
+    } finally {
+      area.remove();
+    }
+  }
+
+  function showTranslationCard(container, payload) {
+    if (!container) return;
+    removeTranslationCard(container);
+
+    const card = document.createElement("div");
+    card.className = "tts-translation-card";
+
+    const meta = document.createElement("div");
+    meta.className = "tts-translation-meta";
+    const metaText = document.createElement("span");
+    metaText.textContent = `${payload.model || settings.translateModel} -> ${payload.target_language || settings.targetLanguage}`;
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "tts-copy-translation-btn";
+    copyBtn.type = "button";
+    copyBtn.textContent = "Copy";
+    meta.appendChild(metaText);
+    meta.appendChild(copyBtn);
+
+    const body = document.createElement("div");
+    body.className = "tts-translation-text";
+    body.textContent = payload.translated_text || "";
+
+    copyBtn.addEventListener("click", (e) => {
+      if (!e.isTrusted) return;
+      e.preventDefault();
+      e.stopPropagation();
+      copyTextToClipboard(body.textContent).then(() => {
+        copyBtn.textContent = "Copied";
+        setTimeout(() => { copyBtn.textContent = "Copy"; }, 1200);
+      }).catch(() => {
+        copyBtn.textContent = "Failed";
+        setTimeout(() => { copyBtn.textContent = "Copy"; }, 1200);
+      });
+    });
+
+    card.appendChild(meta);
+    card.appendChild(body);
+    container.appendChild(card);
+  }
+
+  async function translateSelectedText(text, btnElement, buttonContainer) {
+    isTranslating = true;
+    const generation = translationGate.begin();
+    removeTranslationCard(buttonContainer);
+
+    if (btnElement) {
+      setButtonHtml(
+        btnElement,
+        "tts-translate-btn loading",
+        "\u23F9",
+        "Cancel"
+      );
+    }
+
+    try {
+      const payload = await fetchTranslation(text, generation);
+      if (!translationGate.isCurrent(generation)) return;
+      showTranslationCard(buttonContainer, payload);
+      if (btnElement) {
+        setButtonHtml(
+          btnElement,
+          "tts-translate-btn",
+          "\u2705",
+          "Done"
+        );
+      }
+    } catch (err) {
+      if (!translationGate.isCurrent(generation)) return;
+      console.error("[Kokoro TTS translation]", err);
+      if (btnElement) {
+        setButtonHtml(
+          btnElement,
+          "tts-translate-btn error",
+          "\u274C",
+          err.message.substring(0, 30)
+        );
+      }
+    } finally {
+      if (translationGate.isCurrent(generation)) {
+        translationGate.finish(generation);
+        isTranslating = false;
+      }
+    }
   }
 
   async function playBlobAudioFormat(
@@ -1468,7 +2047,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     () => {
       if (scrollTimer) clearTimeout(scrollTimer);
       scrollTimer = setTimeout(() => {
-        if (floatingBtn && !currentAudio) {
+        if (floatingBtn && !currentAudio && !isTranslating) {
           removeButton();
         }
       }, 200);
@@ -1478,6 +2057,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
 
   window.addEventListener("beforeunload", () => {
     cancelRequest();
+    cancelTranslationRequest();
     stopAudio();
   });
 
