@@ -174,7 +174,7 @@ Returns JSON with `translated_text`, `model`, `target_language` and `elapsed`.
 }
 ```
 
-Returns `prepared_text`: plain English read-aloud text for Kokoro. English prose is kept, Chinese prose is translated to English, and formulas are converted to concise spoken English descriptions.
+Returns `prepared_text`: plain English read-aloud text for Kokoro. English prose is kept, Chinese prose is translated to English, and formulas are converted to concise spoken English descriptions. If this endpoint is unavailable, the userscript falls back to `/translate` with `target_language: "English"` before using the local cleanup fallback.
 
 ### `POST /formula/verbalize`
 

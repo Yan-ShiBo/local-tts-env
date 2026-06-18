@@ -3,7 +3,7 @@
 // @name:zh-CN   本地划词听译助手
 // @name:en      Local Selection Read & Translate
 // @namespace    https://github.com/Yan-ShiBo/local-tts-env
-// @version      1.10.0
+// @version      1.10.1
 // @description  选中文本即可本地朗读或翻译：Kokoro TTS 负责语音朗读，Ollama 模型负责本地翻译，文本不上传云端。
 // @description:en Select text on any page to read aloud locally with Kokoro TTS or translate locally through Ollama.
 // @author       Yan-ShiBo
@@ -2020,6 +2020,60 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     });
   }
 
+  async function fetchReadTranslationFallback(text, generation) {
+    return new Promise((resolve, reject) => {
+      const sourceText = KokoroTTSCore.normalizeLlmSourceText(text);
+      const request = GM_xmlhttpRequest({
+        method: "POST",
+        url: API_TRANSLATE_URL,
+        headers: {
+          "Accept": "application/json",
+          "Content-Type": "application/json",
+        },
+        data: JSON.stringify({
+          text: sourceText,
+          model: settings.translateModel,
+          target_language: "English",
+        }),
+        responseType: "json",
+        timeout: 120000,
+        onload: (response) => {
+          if (!requestGate.isCurrent(generation)) return;
+          requestGate.finish(generation);
+          if (response.status >= 200 && response.status < 300) {
+            try {
+              const payload = response.response || JSON.parse(response.responseText || "{}");
+              resolve(payload);
+            } catch (error) {
+              reject(error);
+            }
+          } else {
+            let detail = response.statusText || "English translation failed";
+            try {
+              const payload = JSON.parse(response.responseText || "{}");
+              if (payload.detail) detail = payload.detail;
+            } catch {}
+            reject(new Error(`Server returned ${response.status}: ${detail}`));
+          }
+        },
+        onerror: () => {
+          if (!requestGate.isCurrent(generation)) return;
+          requestGate.finish(generation);
+          reject(new Error("Cannot connect to local translation server."));
+        },
+        ontimeout: () => {
+          if (!requestGate.isCurrent(generation)) return;
+          requestGate.finish(generation);
+          reject(new Error("English translation timeout."));
+        },
+        onabort: () => reject(new Error("English translation cancelled.")),
+      });
+      if (!requestGate.attach(generation, request)) {
+        reject(new Error("English translation cancelled."));
+      }
+    });
+  }
+
   async function fetchFormulaVerbalizations(formulas, context, generation) {
     if (!formulas || formulas.length === 0) return [];
     return new Promise((resolve, reject) => {
@@ -2074,6 +2128,9 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   }
 
   async function prepareReadableTextForSpeak(text, generation) {
+    let readPreparationError = null;
+    let englishTranslationError = null;
+
     try {
       const payload = await fetchReadPreparation(text, generation);
       if (!requestGate.isCurrent(generation)) {
@@ -2096,11 +2153,41 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       }
     } catch (error) {
       if (!requestGate.isCurrent(generation)) throw error;
-      console.warn("[Kokoro TTS] Read preparation failed; falling back to local cleanup", error);
+      readPreparationError = error;
+      console.warn("[Kokoro TTS] Read preparation failed; falling back to English translation", error);
+    }
+
+    try {
+      const payload = await fetchReadTranslationFallback(text, generation);
+      if (!requestGate.isCurrent(generation)) {
+        return { text: "", formulas: [], changed: false, empty: true };
+      }
+      const translatedText = String(payload && payload.translated_text ? payload.translated_text : "")
+        .replace(/\n{3,}/g, "\n\n")
+        .replace(/[ \t]{2,}/g, " ")
+        .trim();
+      if (translatedText) {
+        return {
+          text: translatedText,
+          formulas: [],
+          changed: translatedText !== String(text || "").trim(),
+          removedChinese: /[\u3400-\u9FFF\uF900-\uFAFF]/.test(String(text || "")) &&
+            !/[\u3400-\u9FFF\uF900-\uFAFF]/.test(translatedText),
+          empty: false,
+          translatedForRead: true,
+        };
+      }
+    } catch (error) {
+      if (!requestGate.isCurrent(generation)) throw error;
+      englishTranslationError = error;
+      console.warn("[Kokoro TTS] English translation fallback failed; falling back to local cleanup", error);
     }
 
     const plan = KokoroTTSCore.prepareTextForReadPlan(text);
     if (plan.formulas.length === 0) {
+      if (plan.empty && (readPreparationError || englishTranslationError)) {
+        throw new Error("Cannot prepare English text. Restart local server and check Ollama.");
+      }
       return plan;
     }
     const verbalizations = await fetchFormulaVerbalizations(
@@ -2501,7 +2588,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       const readPlan = await prepareReadableTextForSpeak(text, generation);
       if (!requestGate.isCurrent(generation)) return;
       if (readPlan.empty) {
-        throw new Error("No readable English text after cleanup.");
+        throw new Error("Cannot prepare English text for reading.");
       }
       const readText = readPlan.text;
       const playbackMode = KokoroTTSCore.choosePlaybackMode(
