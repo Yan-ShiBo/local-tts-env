@@ -403,7 +403,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.json()["detail"], "Local Ollama translation failed")
         self.assertNotIn("secret model path", response.text)
 
-    def test_translate_restores_formula_as_latex_without_description(self):
+    def test_translate_restores_formula_for_frontend_rendering_without_description(self):
         with patch.object(
             server,
             "_call_ollama_translate_raw",
@@ -431,7 +431,7 @@ class ApiTests(unittest.TestCase):
             None,
         )
 
-    def test_translate_english_preserves_formula_as_latex(self):
+    def test_translate_english_preserves_formula_for_frontend_rendering(self):
         with patch.object(
             server,
             "_call_ollama_translate_raw",
@@ -463,7 +463,7 @@ class ApiTests(unittest.TestCase):
         )
         verbalize_call.assert_not_called()
 
-    def test_translate_dataset_formula_keeps_latex_code(self):
+    def test_translate_dataset_formula_keeps_renderer_formula(self):
         with patch.object(
             server,
             "_call_ollama_translate_raw",

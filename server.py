@@ -319,7 +319,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Kokoro TTS 本地服务",
     description="本地运行的高质量英文 TTS 服务（Kokoro 82M）",
-    version="1.7.5",
+    version="1.7.6",
     lifespan=lifespan,
 )
 
@@ -763,7 +763,7 @@ def _format_formula_for_translation(formula: str) -> str:
     return f"${content}$"
 
 
-def _restore_formulas_as_latex(text: str, formulas: list[tuple[str, str]]) -> str:
+def _restore_formulas_for_display(text: str, formulas: list[tuple[str, str]]) -> str:
     result = text
     for placeholder, original in formulas:
         result = result.replace(placeholder, _format_formula_for_translation(original))
@@ -1272,8 +1272,11 @@ def _call_ollama_translate_raw(
             "The context is not part of the requested output. Translate ONLY the content inside <SELECTED_TEXT_TRANSLATE_ONLY>. "
             "Never translate or summarize anything inside <REFERENCE_CONTEXT_DO_NOT_TRANSLATE>. "
             "If the reference context contains [SELECTED_TEXT], treat it only as a location marker and never output it. "
-            f"Translate the prose into {target_language}. Keep all names, numbers, and punctuation. "
+            f"Translate the prose into {target_language}. Translate faithfully sentence by sentence; do not summarize, reinterpret, or add claims. "
+            "If the selected prose is already in the target language, keep it unchanged except for Simplified/Traditional normalization and necessary term cleanup. "
+            "Keep all names, numbers, and punctuation. "
             "CRITICAL: Do NOT translate, modify, omit, or change the capitalization of the placeholders (e.g. __MATH_0__). Keep them exactly as they are. "
+            "Keep placeholders in the same relative positions; the server will restore them as formulas for the browser renderer, so do not create extra LaTeX yourself. "
             "Return only the translated text, with no reasoning, notes, markdown fences, or explanations."
         ),
         "prompt": prompt,
@@ -1774,7 +1777,7 @@ async def translate_endpoint(request: TranslateRequest):
         protected_text, formulas = _protect_formulas(text)
         
         if formulas:
-            # 翻译只处理正文；公式通过占位符保护，最后恢复为可复制的 LaTeX 代码。
+            # 翻译只处理正文；公式通过占位符保护，最后恢复为前端可渲染的公式。
             translated_raw = await asyncio.to_thread(
                 _call_ollama_translate_raw,
                 protected_text,
@@ -1782,8 +1785,8 @@ async def translate_endpoint(request: TranslateRequest):
                 target_language,
                 context,
             )
-            # 2. 还原公式，并将 [[MATH: ...]] 等统一渲染为标准 LaTeX 包裹格式。
-            translated_text = _restore_formulas_as_latex(translated_raw, formulas)
+            # 2. 还原公式，并将 [[MATH: ...]] 等统一渲染为前端可渲染的公式。
+            translated_text = _restore_formulas_for_display(translated_raw, formulas)
         else:
             # 无公式，常规翻译
             translated_text = await asyncio.to_thread(

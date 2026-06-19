@@ -20,7 +20,7 @@ Keep the GitHub links in both places: metadata makes them appear in Greasy Fork'
 - 在设置面板里切换声音、语速、翻译模型和目标语言
 - 查看本地 TTS 服务与 Ollama 模型状态
 - 英文会尽量原样保留，中文会翻成英文，朗读时公式会变成英文口语描述
-- MathJax/MathML/LaTeX 会优先提取语义公式；翻译结果会把公式保留为可复制的 LaTeX 代码
+- MathJax/MathML/LaTeX 会优先提取语义公式；翻译结果会把公式渲染为带上下标的易读公式，而不是显示原始 LaTeX 代码
 - 翻译请求可附带附近正文作为本地参考上下文，只用于术语和指代消歧；真正翻译和输出的只有选中内容
 - 公式口语化会参考项目里的数学术语表；50+ 个核心数学符号会按语境选择更合适的读法，例如右箭头可读作“映射到、趋向于、推导出、得到、右箭头”
 - 如果朗读稿准备接口不可用，`Read` 会退回到 `/translate` 并指定翻译成 English 后再朗读

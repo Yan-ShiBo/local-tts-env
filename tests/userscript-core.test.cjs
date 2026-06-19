@@ -288,8 +288,8 @@ i
 });
 
 
-test("translation display splits LaTeX formulas for code styling", () => {
-  const { splitLatexSegments } = require("../tts-userscript.js");
+test("translation display renders LaTeX formulas as readable math", () => {
+  const { formulaToReadableHtml, latexToReadableFormula, splitLatexSegments } = require("../tts-userscript.js");
   const segments = splitLatexSegments("使用 $D_w \\to \\hat{B}(x)$，并保持 $$x^2+y^2=z^2$$。");
 
   assert.deepEqual(
@@ -304,6 +304,12 @@ test("translation display splits LaTeX formulas for code styling", () => {
   );
   assert.equal(segments[1].value, "$D_w \\to \\hat{B}(x)$");
   assert.equal(segments[3].value, "$$x^2+y^2=z^2$$");
+  assert.equal(latexToReadableFormula("$B_\\theta(x)$"), "B_θ(x)");
+  assert.equal(formulaToReadableHtml("$B_\\theta(x)$"), "B<sub>θ</sub>(x)");
+  assert.equal(
+    formulaToReadableHtml("$D_w \\to \\hat{B}(x)$"),
+    "D<sub>w</sub> → B̂(x)"
+  );
 });
 
 

@@ -3,7 +3,7 @@
 // @name:zh-CN   本地划词听译助手
 // @name:en      Local Selection Read & Translate
 // @namespace    https://github.com/Yan-ShiBo/LocalReadTranslate
-// @version      1.12.0
+// @version      1.12.1
 // @description  选中文本即可本地朗读或翻译：Kokoro TTS 负责语音朗读，Ollama 模型负责本地翻译，文本不上传云端。
 // @description:en Select text on any page to read aloud locally with Kokoro TTS or translate locally through Ollama.
 // @author       Yan-ShiBo
@@ -236,6 +236,154 @@ const KokoroTTSCore = (() => {
       });
     }
     return segments.length ? segments : [{ type: "text", value, block: false }];
+  }
+
+  const READABLE_LATEX_SYMBOLS = Object.freeze({
+    "\\alpha": "α",
+    "\\beta": "β",
+    "\\gamma": "γ",
+    "\\delta": "δ",
+    "\\epsilon": "ε",
+    "\\lambda": "λ",
+    "\\mu": "μ",
+    "\\pi": "π",
+    "\\sigma": "σ",
+    "\\theta": "θ",
+    "\\Theta": "Θ",
+    "\\omega": "ω",
+    "\\Omega": "Ω",
+    "\\rightarrow": "→",
+    "\\to": "→",
+    "\\mapsto": "↦",
+    "\\Rightarrow": "⇒",
+    "\\leq": "≤",
+    "\\le": "≤",
+    "\\geq": "≥",
+    "\\ge": "≥",
+    "\\neq": "≠",
+    "\\ne": "≠",
+    "\\approx": "≈",
+    "\\times": "×",
+    "\\cdot": "·",
+    "\\in": "∈",
+    "\\sum": "∑",
+    "\\int": "∫",
+    "\\infty": "∞",
+    "\\partial": "∂",
+    "\\nabla": "∇",
+  });
+
+  function stripLatexDelimiters(formula) {
+    let value = String(formula || "").trim();
+    if ((value.startsWith("$$") && value.endsWith("$$")) || (value.startsWith("$") && value.endsWith("$"))) {
+      value = value.replace(/^\$\$?/, "").replace(/\$\$?$/, "");
+    } else if (
+      (value.startsWith("\\(") && value.endsWith("\\)")) ||
+      (value.startsWith("\\[") && value.endsWith("\\]"))
+    ) {
+      value = value.slice(2, -2);
+    }
+    return value.trim();
+  }
+
+  function latexToReadableFormula(formula) {
+    let value = stripLatexDelimiters(formula);
+    if (!value) return "";
+
+    value = value
+      .replace(/\\(?:left|right)\b/g, "")
+      .replace(/\\[,;!]/g, " ");
+
+    value = value.replace(/\\(?:widehat|hat)\s*\{?([A-Za-zΑ-Ωα-ω])\}?/g, "$1\u0302");
+    value = value.replace(/\\(?:overline|bar)\s*\{?([A-Za-zΑ-Ωα-ω])\}?/g, "$1\u0304");
+    value = value.replace(/\\(?:widetilde|tilde)\s*\{?([A-Za-zΑ-Ωα-ω])\}?/g, "$1\u0303");
+
+    Object.entries(READABLE_LATEX_SYMBOLS)
+      .sort((a, b) => b[0].length - a[0].length)
+      .forEach(([latex, symbol]) => {
+        value = value.split(latex).join(symbol);
+      });
+
+    value = value.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, "($1)/($2)");
+    value = value.replace(/\\sqrt\{([^{}]+)\}/g, "√($1)");
+    value = value.replace(/_\{([^{}]+)\}/g, "_$1");
+    value = value.replace(/\^\{([^{}]+)\}/g, "^$1");
+    value = value.replace(/\\\{/g, "{").replace(/\\\}/g, "}");
+    value = value.replace(/\\([A-Za-z]+)/g, "$1");
+    value = value.replace(/\s+/g, " ");
+    value = value.replace(/\s*([=,+*/(){}])\s*/g, "$1");
+    value = value.replace(/\s*(→|↦|⇒|≤|≥|≠|≈|∈)\s*/g, " $1 ");
+    return value.trim();
+  }
+
+  function escapeFormulaHtml(value) {
+    return String(value || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function readFormulaScriptArgument(value, startIndex) {
+    if (value[startIndex] === "{") {
+      let depth = 0;
+      for (let index = startIndex; index < value.length; index += 1) {
+        const char = value[index];
+        if (char === "{") depth += 1;
+        if (char === "}") depth -= 1;
+        if (depth === 0) {
+          return {
+            arg: value.slice(startIndex + 1, index),
+            nextIndex: index + 1,
+          };
+        }
+      }
+    }
+
+    const nextChar = value[startIndex] || "";
+    return {
+      arg: nextChar,
+      nextIndex: startIndex + (nextChar ? 1 : 0),
+    };
+  }
+
+  function formulaTextToHtml(value) {
+    let html = "";
+    let buffer = "";
+
+    function flushBuffer() {
+      if (buffer) {
+        html += escapeFormulaHtml(buffer);
+        buffer = "";
+      }
+    }
+
+    for (let index = 0; index < value.length; index += 1) {
+      const char = value[index];
+      if ((char === "_" || char === "^") && index + 1 < value.length) {
+        flushBuffer();
+        const { arg, nextIndex } = readFormulaScriptArgument(value, index + 1);
+        const tag = char === "_" ? "sub" : "sup";
+        html += `<${tag}>${formulaTextToHtml(arg)}</${tag}>`;
+        index = nextIndex - 1;
+        continue;
+      }
+      buffer += char;
+    }
+    flushBuffer();
+    return html;
+  }
+
+  function formulaToReadableHtml(formula) {
+    const readable = latexToReadableFormula(formula);
+    return formulaTextToHtml(readable);
+  }
+
+  function readableTranslationText(text) {
+    return splitLatexSegments(text)
+      .map((segment) => (segment.type === "latex" ? latexToReadableFormula(segment.value) : segment.value))
+      .join("");
   }
 
   function verbalizeSimpleFormula(formula) {
@@ -524,7 +672,9 @@ const KokoroTTSCore = (() => {
     createAppendQueue,
     createRequestGate,
     formatPlaybackProgress,
+    formulaToReadableHtml,
     isUnsupportedMediaError,
+    latexToReadableFormula,
     normalizeAudioBuffer,
     normalizeAudioBlob,
     normalizeLlmSourceText,
@@ -863,28 +1013,31 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
       font-size: 14px;
     }
 
-    .tts-latex-code {
+    .tts-formula-rendered {
       display: inline;
-      padding: 1px 5px;
-      border: 1px solid rgba(80, 210, 155, 0.22);
-      border-radius: 5px;
-      background: rgba(80, 210, 155, 0.1);
-      color: #cdf7e7;
-      font-family: 'Cascadia Code', Consolas, 'Liberation Mono', monospace;
-      font-size: 12.5px;
-      line-height: 1.65;
-      white-space: pre-wrap;
-      word-break: break-word;
+      padding: 0 2px;
+      color: #f1f5f9;
+      font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
+      font-size: 15px;
+      line-height: 1.75;
+      white-space: nowrap;
     }
 
-    .tts-latex-code.tts-latex-block {
+    .tts-formula-rendered sub,
+    .tts-formula-rendered sup {
+      font-size: 0.72em;
+      line-height: 0;
+    }
+
+    .tts-formula-rendered.tts-formula-block {
       display: block;
       max-width: 100%;
       margin: 7px 0;
-      padding: 8px;
+      padding: 6px 0;
       overflow-x: auto;
-      white-space: pre;
+      white-space: nowrap;
       word-break: normal;
+      text-align: center;
     }
 
     /* -- Icon -- */
@@ -2684,7 +2837,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     }
   }
 
-  function appendTranslationTextWithLatex(container, text) {
+  function appendTranslationTextWithFormulas(container, text) {
     container.textContent = "";
     const segments = KokoroTTSCore.splitLatexSegments(text);
     segments.forEach((segment) => {
@@ -2692,12 +2845,12 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
         container.appendChild(document.createTextNode(segment.value));
         return;
       }
-      const code = document.createElement("code");
-      code.className = segment.block
-        ? "tts-latex-code tts-latex-block"
-        : "tts-latex-code";
-      code.textContent = segment.value;
-      container.appendChild(code);
+      const formula = document.createElement("span");
+      formula.className = segment.block
+        ? "tts-formula-rendered tts-formula-block"
+        : "tts-formula-rendered";
+      formula.innerHTML = KokoroTTSCore.formulaToReadableHtml(segment.value);
+      container.appendChild(formula);
     });
   }
 
@@ -2721,7 +2874,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
 
     const body = document.createElement("div");
     body.className = "tts-translation-text";
-    appendTranslationTextWithLatex(body, payload.translated_text || "");
+    appendTranslationTextWithFormulas(body, payload.translated_text || "");
 
     copyBtn.addEventListener("click", (e) => {
       if (!e.isTrusted) return;
