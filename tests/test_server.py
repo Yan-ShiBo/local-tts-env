@@ -1,4 +1,5 @@
 import asyncio
+import json
 import subprocess
 import sys
 import unittest
@@ -28,6 +29,20 @@ class FakePipeline:
             raise self.error
         for segment in self.segments:
             yield None, None, segment
+
+
+class FakeUrlopenResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
 
 
 class AudioCoreTests(unittest.TestCase):
@@ -343,8 +358,34 @@ class ApiTests(unittest.TestCase):
             "It is safe.",
             "translategemma:4b",
             "Simplified Chinese",
-            "The paragraph discusses control theory and barrier certificates. It is safe.",
+            "The paragraph discusses control theory and barrier certificates. [SELECTED_TEXT]",
         )
+
+    def test_translate_prompt_marks_context_as_reference_only(self):
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeUrlopenResponse({"response": "只翻译选中内容"})
+
+        with patch.object(server.urllib_request, "urlopen", side_effect=fake_urlopen):
+            result = server._call_ollama_translate_raw(
+                "selected sentence",
+                "translategemma:4b",
+                "Simplified Chinese",
+                "reference before [SELECTED_TEXT] reference after",
+            )
+
+        self.assertEqual(result, "只翻译选中内容")
+        prompt = captured["payload"]["prompt"]
+        system = captured["payload"]["system"]
+        self.assertIn("<REFERENCE_CONTEXT_DO_NOT_TRANSLATE>", prompt)
+        self.assertIn("<SELECTED_TEXT_TRANSLATE_ONLY>", prompt)
+        self.assertIn("reference before [SELECTED_TEXT] reference after", prompt)
+        self.assertIn("selected sentence", prompt)
+        self.assertLess(prompt.index("</REFERENCE_CONTEXT_DO_NOT_TRANSLATE>"), prompt.index("<SELECTED_TEXT_TRANSLATE_ONLY>"))
+        self.assertIn("Translate ONLY the content inside <SELECTED_TEXT_TRANSLATE_ONLY>", system)
+        self.assertIn("Never translate or summarize anything inside <REFERENCE_CONTEXT_DO_NOT_TRANSLATE>", system)
 
     def test_translate_hides_ollama_errors(self):
         with patch.object(

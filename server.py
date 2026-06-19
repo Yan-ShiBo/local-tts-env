@@ -319,7 +319,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Kokoro TTS 本地服务",
     description="本地运行的高质量英文 TTS 服务（Kokoro 82M）",
-    version="1.7.4",
+    version="1.7.5",
     lifespan=lifespan,
 )
 
@@ -598,8 +598,11 @@ def _normalize_llm_source_text(text: str) -> str:
 
 def _normalize_translation_context(context: Optional[str], selected_text: str) -> Optional[str]:
     normalized = _normalize_llm_source_text((context or "").strip())
-    if not normalized or normalized == selected_text:
+    selected = _normalize_llm_source_text(selected_text)
+    if not normalized or normalized == selected:
         return None
+    if selected and selected in normalized:
+        normalized = normalized.replace(selected, "[SELECTED_TEXT]", 1)
     if len(normalized) > 4000:
         normalized = normalized[:4000].rsplit(" ", 1)[0].strip() or normalized[:4000].strip()
     return normalized
@@ -1252,10 +1255,12 @@ def _call_ollama_translate_raw(
     prompt = protected_text
     if context:
         prompt = (
-            "Context for terminology and disambiguation only. Do not translate or output this context:\n"
-            f"{context}\n\n"
-            "Selected text to translate:\n"
-            f"{protected_text}"
+            "<REFERENCE_CONTEXT_DO_NOT_TRANSLATE>\n"
+            f"{context}\n"
+            "</REFERENCE_CONTEXT_DO_NOT_TRANSLATE>\n\n"
+            "<SELECTED_TEXT_TRANSLATE_ONLY>\n"
+            f"{protected_text}\n"
+            "</SELECTED_TEXT_TRANSLATE_ONLY>"
         )
     payload = {
         "model": model,
@@ -1263,8 +1268,10 @@ def _call_ollama_translate_raw(
         "system": (
             "You are a precise translation engine. The input contains text with placeholders "
             "like __MATH_0__, __MATH_1__, etc. which represent mathematical formulas. "
-            "Use surrounding context, if provided, only to choose accurate terminology and references. "
-            "Translate only the selected text, never the context block. "
+            "Use surrounding context only to choose accurate terminology, pronoun references, and domain-specific wording. "
+            "The context is not part of the requested output. Translate ONLY the content inside <SELECTED_TEXT_TRANSLATE_ONLY>. "
+            "Never translate or summarize anything inside <REFERENCE_CONTEXT_DO_NOT_TRANSLATE>. "
+            "If the reference context contains [SELECTED_TEXT], treat it only as a location marker and never output it. "
             f"Translate the prose into {target_language}. Keep all names, numbers, and punctuation. "
             "CRITICAL: Do NOT translate, modify, omit, or change the capitalization of the placeholders (e.g. __MATH_0__). Keep them exactly as they are. "
             "Return only the translated text, with no reasoning, notes, markdown fences, or explanations."
