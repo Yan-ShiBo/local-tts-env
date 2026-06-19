@@ -319,7 +319,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Kokoro TTS 本地服务",
     description="本地运行的高质量英文 TTS 服务（Kokoro 82M）",
-    version="1.7.10",
+    version="1.7.11",
     lifespan=lifespan,
 )
 
@@ -612,14 +612,14 @@ def _model_context_limit(model: Optional[str], purpose: str = "translation") -> 
     size = _model_size_billions(model)
     profiles = {
         "translation": {
-            "small": 900,
+            "small": 0,
             "medium": 1800,
             "large": 4000,
             "xlarge": 6000,
             "unknown": 1600,
         },
         "read_translation": {
-            "small": 700,
+            "small": 0,
             "medium": 1400,
             "large": 3000,
             "xlarge": 4500,
@@ -689,7 +689,8 @@ def _limit_model_context(
     normalized = _normalize_llm_source_text((context or "").strip())
     if not normalized:
         return None
-    return _trim_context_to_limit(normalized, _model_context_limit(model, purpose))
+    limited = _trim_context_to_limit(normalized, _model_context_limit(model, purpose))
+    return limited or None
 
 
 def _normalize_translation_context(
@@ -704,7 +705,8 @@ def _normalize_translation_context(
         return None
     if selected and selected in normalized:
         normalized = normalized.replace(selected, "[SELECTED_TEXT]", 1)
-    return _trim_context_to_limit(normalized, _model_context_limit(model, purpose))
+    limited = _trim_context_to_limit(normalized, _model_context_limit(model, purpose))
+    return limited or None
 
 
 def _call_ollama_json(path: str, timeout: float = 5.0):
@@ -1669,7 +1671,7 @@ def _call_ollama_read_prepare(
                 value,
                 model,
                 "read_translation",
-            ) or formula_context
+            ) or (formula_context or None)
             translated = _translate_read_chinese_segment(value, model, segment_context)
             if translated:
                 pieces.append(translated)

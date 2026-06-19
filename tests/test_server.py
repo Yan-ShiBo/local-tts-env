@@ -337,7 +337,7 @@ class ApiTests(unittest.TestCase):
             None,
         )
 
-    def test_translate_uses_context_for_disambiguation(self):
+    def test_translate_uses_context_for_disambiguation_with_large_model(self):
         with patch.object(
             server,
             "_call_ollama_translate_raw",
@@ -349,6 +349,7 @@ class ApiTests(unittest.TestCase):
                 json={
                     "text": "It is safe.",
                     "context": "The paragraph discusses control theory and barrier certificates. It is safe.",
+                    "model": "qwen3:14b",
                 },
             )
 
@@ -356,12 +357,44 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.json()["translated_text"], "屏障证书是安全的。")
         call.assert_called_once_with(
             "It is safe.",
-            "translategemma:4b",
+            "qwen3:14b",
             "Simplified Chinese",
             "The paragraph discusses control theory and barrier certificates. [SELECTED_TEXT]",
         )
 
+    def test_translate_ignores_context_for_4b_model(self):
+        with patch.object(
+            server,
+            "_call_ollama_translate_raw",
+            create=True,
+            return_value="它是安全的。",
+        ) as call:
+            response = self.client.post(
+                "/translate",
+                json={
+                    "text": "It is safe.",
+                    "context": "The paragraph discusses control theory and barrier certificates. It is safe.",
+                    "model": "translategemma:4b",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        call.assert_called_once_with(
+            "It is safe.",
+            "translategemma:4b",
+            "Simplified Chinese",
+            None,
+        )
+
     def test_model_context_limits_scale_by_model_size(self):
+        self.assertEqual(
+            server._model_context_limit("translategemma:4b", "translation"),
+            0,
+        )
+        self.assertEqual(
+            server._model_context_limit("translategemma:4b", "read_translation"),
+            0,
+        )
         self.assertLess(
             server._model_context_limit("translategemma:4b", "translation"),
             server._model_context_limit("glm4:9b", "translation"),
@@ -375,7 +408,7 @@ class ApiTests(unittest.TestCase):
             server._model_context_limit("qwen3:14b", "formula"),
         )
 
-    def test_small_model_context_is_short_and_keeps_selection_marker(self):
+    def test_small_model_translation_context_is_disabled(self):
         selected = "It is safe."
         context = (
             "far before " * 200
@@ -391,6 +424,19 @@ class ApiTests(unittest.TestCase):
             "translategemma:4b",
             "translation",
         )
+
+        self.assertIsNone(small)
+
+    def test_large_model_context_keeps_selection_marker(self):
+        selected = "It is safe."
+        context = (
+            "far before " * 200
+            + "The paragraph discusses neural barrier certificates. "
+            + selected
+            + " The next sentence explains fitting loss and barrier loss. "
+            + "far after " * 200
+        )
+
         large = server._normalize_translation_context(
             context,
             selected,
@@ -398,11 +444,10 @@ class ApiTests(unittest.TestCase):
             "translation",
         )
 
-        self.assertIsNotNone(small)
-        self.assertIn("[SELECTED_TEXT]", small)
-        self.assertLessEqual(len(small), server._model_context_limit("translategemma:4b", "translation"))
-        self.assertGreater(len(large), len(small))
-        self.assertIn("barrier certificates", small)
+        self.assertIsNotNone(large)
+        self.assertIn("[SELECTED_TEXT]", large)
+        self.assertLessEqual(len(large), server._model_context_limit("qwen3:14b", "translation"))
+        self.assertIn("barrier certificates", large)
 
     def test_translate_prompt_marks_context_as_reference_only(self):
         captured = {}
@@ -414,7 +459,7 @@ class ApiTests(unittest.TestCase):
         with patch.object(server.urllib_request, "urlopen", side_effect=fake_urlopen):
             result = server._call_ollama_translate_raw(
                 "selected sentence",
-                "translategemma:4b",
+                "qwen3:14b",
                 "Simplified Chinese",
                 "reference before [SELECTED_TEXT] reference after",
             )
@@ -665,7 +710,7 @@ class ApiTests(unittest.TestCase):
         def translate_side_effect(text, model, target_language, context):
             self.assertEqual(model, "translategemma:4b")
             self.assertEqual(target_language, "English")
-            self.assertIn("[SELECTED_TEXT]", context)
+            self.assertIsNone(context)
             if text == "其中":
                 return "where"
             if text == "是候选函数。":
@@ -741,7 +786,7 @@ class ApiTests(unittest.TestCase):
         call.assert_called_once_with(
             ["x^2 + y^2 = z^2"],
             "translategemma:4b",
-            "",
+            None,
         )
 
     def test_formula_verbalize_hides_ollama_errors(self):
