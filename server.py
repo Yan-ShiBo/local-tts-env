@@ -319,7 +319,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Kokoro TTS 本地服务",
     description="本地运行的高质量英文 TTS 服务（Kokoro 82M）",
-    version="1.7.6",
+    version="1.7.7",
     lifespan=lifespan,
 )
 
@@ -402,6 +402,7 @@ class ReadPrepareRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(max_length=12000)
+    context: Optional[str] = Field(default=None, max_length=12000)
     model: Optional[str] = Field(default=None, max_length=120)
 
     @field_validator("model")
@@ -1327,6 +1328,96 @@ def _remove_remaining_cjk_for_tts(text: str) -> str:
     return cleaned.strip()
 
 
+_READ_PLACEHOLDER_PATTERN = re.compile(r"__MATH_(\d+)__")
+_CJK_PUNCTUATION = set("，。！？；：、（）《》“”‘’—…·")
+
+
+def _clean_english_read_segment(text: str) -> str:
+    value = str(text or "")
+    value = re.sub(r"```[\s\S]*?```", " ", value)
+    value = re.sub(r"~~~[\s\S]*?~~~", " ", value)
+    value = re.sub(r"`[^`\n]*`", " ", value)
+    value = re.sub(r"\[([^\]\n]{1,80})\]\((?:https?://|mailto:)[^)]+\)", r"\1", value)
+    value = re.sub(r"\bhttps?://\S+", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bwww\.\S+", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", " ", value)
+    value = re.sub(r"\[\d+(?:,\s*\d+)*\]", " ", value)
+    value = re.sub(r"\(\s*(?:fig|figure|table|eq|equation)\.?\s*\d+\s*\)", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"[\u3400-\u9fff\uf900-\ufaff]+", " ", value)
+    value = re.sub(r"\s+", " ", value)
+    value = re.sub(r"\s+([.,;:!?])", r"\1", value)
+    return value.strip()
+
+
+def _read_char_kind(char: str, current_kind: Optional[str]) -> str:
+    if re.match(r"[\u3400-\u9fff\uf900-\ufaff]", char):
+        return "zh"
+    if char in _CJK_PUNCTUATION:
+        return current_kind or "zh"
+    return "en"
+
+
+def _split_prose_for_read(text: str) -> list[tuple[str, str]]:
+    segments: list[tuple[str, str]] = []
+    current: list[str] = []
+    current_kind: Optional[str] = None
+
+    def flush():
+        nonlocal current, current_kind
+        value = "".join(current).strip()
+        if value:
+            segments.append((current_kind or "en", value))
+        current = []
+        current_kind = None
+
+    for char in str(text or ""):
+        if char.isspace():
+            if current:
+                current.append(" ")
+            continue
+        kind = _read_char_kind(char, current_kind)
+        if current_kind and kind != current_kind:
+            flush()
+        current_kind = kind
+        current.append(char)
+    flush()
+    return segments
+
+
+def _split_protected_read_segments(protected_text: str) -> list[tuple[str, str]]:
+    segments: list[tuple[str, str]] = []
+    last = 0
+    for match in _READ_PLACEHOLDER_PATTERN.finditer(protected_text):
+        if match.start() > last:
+            segments.extend(_split_prose_for_read(protected_text[last:match.start()]))
+        segments.append(("formula", match.group(1)))
+        last = match.end()
+    if last < len(protected_text):
+        segments.extend(_split_prose_for_read(protected_text[last:]))
+    return segments
+
+
+def _normalize_prepared_read_text(text: str) -> str:
+    value = re.sub(r"\s+", " ", text or "")
+    value = re.sub(r"\s+([.,;:!?])", r"\1", value)
+    value = re.sub(r"\(\s+", "(", value)
+    value = re.sub(r"\s+\)", ")", value)
+    return value.strip()
+
+
+def _translate_read_chinese_segment(segment: str, model: str, context: Optional[str]) -> str:
+    translated = _call_ollama_translate_raw(
+        segment,
+        model,
+        "English",
+        context,
+    )
+    translated = _clean_english_read_segment(translated)
+    if _contains_cjk(translated):
+        translated = _remove_remaining_cjk_for_tts(translated)
+    return translated
+
+
 def _call_ollama_text_generation(
     *,
     model: str,
@@ -1374,7 +1465,7 @@ def _call_ollama_text_generation(
     return result
 
 
-def _call_ollama_read_prepare(text: str, model: str) -> str:
+def _call_ollama_read_prepare_whole(text: str, model: str) -> str:
     glossary_prompt = _math_glossary_prompt("en")
     system_prompt = (
         "You prepare selected web text for English text-to-speech. The input may "
@@ -1428,6 +1519,54 @@ def _call_ollama_read_prepare(text: str, model: str) -> str:
         prepared = re.sub(r"\s+\n", "\n", prepared)
         prepared = re.sub(r"\n{3,}", "\n\n", prepared)
         prepared = re.sub(r"[ \t]{2,}", " ", prepared).strip()
+    if _contains_cjk(prepared):
+        prepared = _remove_remaining_cjk_for_tts(prepared)
+    return prepared
+
+
+def _call_ollama_read_prepare(
+    text: str,
+    model: str,
+    context: Optional[str] = None,
+) -> str:
+    protected_text, formulas = _protect_formulas(text)
+    formula_context = _normalize_llm_source_text(context or text)[:4000]
+    translation_context_source = _normalize_llm_source_text(context or text)
+
+    formula_verbalizations: list[str] = []
+    if formulas:
+        try:
+            formula_verbalizations = _call_ollama_formula_verbalization(
+                [original for _, original in formulas],
+                model,
+                formula_context,
+            )
+        except Exception as error:
+            print(f"[WARN] Formula read verbalization failed, using omission fallback: {error}")
+            formula_verbalizations = ["formula omitted"] * len(formulas)
+
+    pieces: list[str] = []
+    for kind, value in _split_protected_read_segments(protected_text):
+        if kind == "formula":
+            index = int(value)
+            if 0 <= index < len(formula_verbalizations):
+                pieces.append(formula_verbalizations[index])
+            else:
+                pieces.append("formula omitted")
+            continue
+        if kind == "zh":
+            segment_context = _normalize_translation_context(translation_context_source, value) or formula_context
+            translated = _translate_read_chinese_segment(value, model, segment_context)
+            if translated:
+                pieces.append(translated)
+            continue
+        cleaned = _clean_english_read_segment(value)
+        if cleaned:
+            pieces.append(cleaned)
+
+    prepared = _normalize_prepared_read_text(" ".join(pieces))
+    if not prepared:
+        prepared = _call_ollama_read_prepare_whole(text, model)
     if _contains_cjk(prepared):
         prepared = _remove_remaining_cjk_for_tts(prepared)
     return prepared
@@ -1823,6 +1962,7 @@ async def read_prepare_endpoint(request: ReadPrepareRequest):
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
     model = request.model or OLLAMA_READ_MODEL
+    context = _normalize_llm_source_text(request.context or "")
 
     try:
         t0 = time.perf_counter()
@@ -1830,6 +1970,7 @@ async def read_prepare_endpoint(request: ReadPrepareRequest):
             _call_ollama_read_prepare,
             text,
             model,
+            context,
         )
         elapsed = time.perf_counter() - t0
         print(

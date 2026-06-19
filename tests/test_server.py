@@ -547,6 +547,7 @@ class ApiTests(unittest.TestCase):
         call.assert_called_once_with(
             "这一阶段是：\n\nB 0 (x) -> D w",
             "translategemma:4b",
+            "",
         )
 
     def test_read_prepare_hides_ollama_errors(self):
@@ -574,7 +575,60 @@ class ApiTests(unittest.TestCase):
             cleaned,
             "where B sub zero of x is a neural barrier candidate.",
         )
-        self.assertFalse(server._contains_cjk(cleaned))
+
+    def test_read_prepare_splits_english_chinese_and_formula(self):
+        def translate_side_effect(text, model, target_language, context):
+            self.assertEqual(model, "translategemma:4b")
+            self.assertEqual(target_language, "English")
+            self.assertIn("[SELECTED_TEXT]", context)
+            if text == "其中":
+                return "where"
+            if text == "是候选函数。":
+                return "is a candidate function."
+            raise AssertionError(f"unexpected translation chunk: {text!r}")
+
+        with patch.object(
+            server,
+            "_call_ollama_translate_raw",
+            side_effect=translate_side_effect,
+        ) as translate_call, patch.object(
+            server,
+            "_call_ollama_formula_verbalization",
+            return_value=["B theta of x"],
+        ) as formula_call:
+            response = self.client.post(
+                "/read/prepare",
+                json={
+                    "text": r"This sentence stays English. 其中 [[MATH: B_\theta(x)]] 是候选函数。",
+                    "context": r"The paragraph discusses neural barrier certificates. 其中 [[MATH: B_\theta(x)]] 是候选函数。",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["prepared_text"],
+            "This sentence stays English. where B theta of x is a candidate function.",
+        )
+        self.assertEqual(translate_call.call_count, 2)
+        formula_call.assert_called_once_with(
+            [r"[[MATH: B_\theta(x)]]"],
+            "translategemma:4b",
+            r"The paragraph discusses neural barrier certificates. 其中 [[MATH: B_\theta(x)]] 是候选函数。",
+        )
+
+    def test_read_prepare_keeps_english_without_model_translation(self):
+        with patch.object(server, "_call_ollama_translate_raw") as translate_call, patch.object(
+            server,
+            "_call_ollama_formula_verbalization",
+        ) as formula_call:
+            prepared = server._call_ollama_read_prepare(
+                "Plain English sentence for reading.",
+                "translategemma:4b",
+            )
+
+        self.assertEqual(prepared, "Plain English sentence for reading.")
+        translate_call.assert_not_called()
+        formula_call.assert_not_called()
 
     def test_formula_verbalize_uses_local_ollama(self):
         with patch.object(

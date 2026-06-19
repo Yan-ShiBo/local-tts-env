@@ -20,7 +20,7 @@
 - **Browser settings panel** — Change voice, speed and translation model from a floating gear icon
 - **Local translation** — Select text and translate it locally through Ollama (`translategemma:4b` by default, switchable to another local model)
 - **Context-aware selected translation** — Nearby text can be sent as reference context for terminology and pronoun disambiguation, but only the selected text is translated
-- **LLM read preparation** — Before read-aloud, selected text is normalized through local `translategemma:4b`: English is kept, Chinese is translated to English, and formulas become spoken English
+- **Segmented read preparation** — Before read-aloud, English is kept unchanged, Chinese chunks are translated to English with local context, and formulas are converted to spoken English from their notation plus context
 - **Formula-aware cleanup** — MathJax/MathML/LaTeX selections are extracted semantically when possible; read-aloud turns formulas into spoken English, while translation renders formulas as readable math with subscripts and superscripts
 - **Configurable math glossary** — `config/math_glossary.json` lists direct readings and contextual meanings for 50+ core symbols such as arrows, hats, subscripts, set braces and calculus operators, so formulas can be spoken more professionally
 - **Selection-aware UI** — Read/Translate controls stay below the selection, can run independently, and translation cards reposition around the selected text to reduce overlap

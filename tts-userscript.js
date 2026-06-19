@@ -3,7 +3,7 @@
 // @name:zh-CN   本地划词听译助手
 // @name:en      Local Selection Read & Translate
 // @namespace    https://github.com/Yan-ShiBo/LocalReadTranslate
-// @version      1.12.1
+// @version      1.12.2
 // @description  选中文本即可本地朗读或翻译：Kokoro TTS 负责语音朗读，Ollama 模型负责本地翻译，文本不上传云端。
 // @description:en Select text on any page to read aloud locally with Kokoro TTS or translate locally through Ollama.
 // @author       Yan-ShiBo
@@ -2561,9 +2561,10 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     });
   }
 
-  async function fetchReadPreparation(text, generation) {
+  async function fetchReadPreparation(text, context, generation) {
     return new Promise((resolve, reject) => {
       const sourceText = KokoroTTSCore.normalizeLlmSourceText(text);
+      const contextText = KokoroTTSCore.normalizeLlmSourceText(context);
       const request = GM_xmlhttpRequest({
         method: "POST",
         url: API_READ_PREPARE_URL,
@@ -2573,6 +2574,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
         },
         data: JSON.stringify({
           text: sourceText,
+          context: contextText || undefined,
         }),
         responseType: "json",
         timeout: 120000,
@@ -2613,9 +2615,10 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     });
   }
 
-  async function fetchReadTranslationFallback(text, generation) {
+  async function fetchReadTranslationFallback(text, context, generation) {
     return new Promise((resolve, reject) => {
       const sourceText = KokoroTTSCore.normalizeLlmSourceText(text);
+      const contextText = KokoroTTSCore.normalizeLlmSourceText(context);
       const request = GM_xmlhttpRequest({
         method: "POST",
         url: API_TRANSLATE_URL,
@@ -2625,6 +2628,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
         },
         data: JSON.stringify({
           text: sourceText,
+          context: contextText || undefined,
           model: settings.translateModel,
           target_language: "English",
         }),
@@ -2741,12 +2745,12 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     };
   }
 
-  async function prepareReadableTextForSpeak(text, generation) {
+  async function prepareReadableTextForSpeak(text, context, generation) {
     let readPreparationError = null;
     let englishTranslationError = null;
 
     try {
-      const payload = await fetchReadPreparation(text, generation);
+      const payload = await fetchReadPreparation(text, context, generation);
       if (!requestGate.isCurrent(generation)) {
         return { text: "", formulas: [], changed: false, empty: true };
       }
@@ -2772,7 +2776,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     }
 
     try {
-      const payload = await fetchReadTranslationFallback(text, generation);
+      const payload = await fetchReadTranslationFallback(text, context, generation);
       if (!requestGate.isCurrent(generation)) {
         return { text: "", formulas: [], changed: false, empty: true };
       }
@@ -3203,6 +3207,9 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     const buttonContainer = btnElement
       ? btnElement.closest(".tts-float-container")
       : null;
+    const context = buttonContainer && buttonContainer._ttsSelectionContext
+      ? buttonContainer._ttsSelectionContext
+      : "";
     focusFloatingAction(buttonContainer, btnElement);
 
     if (btnElement) {
@@ -3215,7 +3222,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     }
 
     try {
-      const readPlan = await prepareReadableTextForSpeak(text, generation);
+      const readPlan = await prepareReadableTextForSpeak(text, context, generation);
       if (!requestGate.isCurrent(generation)) return;
       if (readPlan.empty) {
         throw new Error("Cannot prepare English text for reading.");

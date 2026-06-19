@@ -15,7 +15,7 @@ Keep the GitHub links in both places: metadata makes them appear in Greasy Fork'
 
 选中网页上的文本后，可以直接：
 
-- `Read`：先调用本机 `translategemma:4b` 准备英文朗读稿，再交给 Kokoro TTS 朗读
+- `Read`：按英文、中文、公式分段准备朗读稿；英文直接保留，中文按上下文翻成英文，公式按上下文和自身符号转成英文口语描述，再交给 Kokoro TTS 朗读
 - `Translate`：调用本机 Ollama 模型翻译，默认 `translategemma:4b`
 - 在设置面板里切换声音、语速、翻译模型和目标语言
 - 查看本地 TTS 服务与 Ollama 模型状态
