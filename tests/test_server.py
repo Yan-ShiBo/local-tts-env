@@ -118,6 +118,34 @@ assert server.torch is None
 
         self.assertEqual(cleaned, "你好，世界")
 
+    def test_ollama_thinking_mode_disabled_for_qwen3_generation(self):
+        payload = {}
+
+        server._apply_ollama_thinking_mode(payload, "qwen3:14b")
+
+        self.assertIs(payload["think"], False)
+
+    def test_ollama_thinking_mode_disabled_for_other_reasoning_models(self):
+        payload = {}
+
+        server._apply_ollama_thinking_mode(payload, "deepseek-r1:8b")
+
+        self.assertIs(payload["think"], False)
+
+    def test_ollama_thinking_mode_unchanged_for_non_reasoning_models(self):
+        payload = {}
+
+        server._apply_ollama_thinking_mode(payload, "translategemma:4b")
+
+        self.assertNotIn("think", payload)
+
+    def test_ollama_thinking_mode_unchanged_for_embedding_models(self):
+        payload = {}
+
+        server._apply_ollama_thinking_mode(payload, "qwen3-embedding:4b")
+
+        self.assertNotIn("think", payload)
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
@@ -465,6 +493,7 @@ class ApiTests(unittest.TestCase):
             )
 
         self.assertEqual(result, "只翻译选中内容")
+        self.assertIs(captured["payload"]["think"], False)
         prompt = captured["payload"]["prompt"]
         system = captured["payload"]["system"]
         self.assertIn("<REFERENCE_CONTEXT_DO_NOT_TRANSLATE>", prompt)

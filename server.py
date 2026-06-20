@@ -319,7 +319,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Kokoro TTS 本地服务",
     description="本地运行的高质量英文 TTS 服务（Kokoro 82M）",
-    version="1.7.11",
+    version="1.7.12",
     lifespan=lifespan,
 )
 
@@ -606,6 +606,18 @@ def _model_size_billions(model: Optional[str]) -> Optional[float]:
         return float(matches[-1])
     except ValueError:
         return None
+
+
+def _ollama_should_disable_thinking(model: Optional[str]) -> bool:
+    value = re.sub(r"[^a-z0-9]+", "", (model or "").lower())
+    if not value or "embedding" in value:
+        return False
+    return any(marker in value for marker in ("qwen3", "qwq", "deepseekr1"))
+
+
+def _apply_ollama_thinking_mode(payload: dict, model: Optional[str]) -> None:
+    if _ollama_should_disable_thinking(model):
+        payload["think"] = False
 
 
 def _model_context_limit(model: Optional[str], purpose: str = "translation") -> int:
@@ -1297,6 +1309,7 @@ def _call_ollama_formula_verbalization_zh_single(
             "top_p": 0.9,
         },
     }
+    _apply_ollama_thinking_mode(payload, model)
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib_request.Request(
         f"{OLLAMA_BASE_URL}/api/generate",
@@ -1397,6 +1410,7 @@ def _call_ollama_translate_raw(
             "top_p": 0.9,
         },
     }
+    _apply_ollama_thinking_mode(payload, model)
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib_request.Request(
         f"{OLLAMA_BASE_URL}/api/generate",
@@ -1547,6 +1561,7 @@ def _call_ollama_text_generation(
             "top_p": 0.9,
         },
     }
+    _apply_ollama_thinking_mode(payload, model)
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib_request.Request(
         f"{OLLAMA_BASE_URL}/api/generate",
@@ -1841,6 +1856,7 @@ def _call_ollama_formula_verbalization(
             "top_p": 0.9,
         },
     }
+    _apply_ollama_thinking_mode(payload, model)
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib_request.Request(
         f"{OLLAMA_BASE_URL}/api/generate",

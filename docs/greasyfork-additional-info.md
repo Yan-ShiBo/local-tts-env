@@ -23,6 +23,7 @@ Keep the GitHub links in both places: metadata makes them appear in Greasy Fork'
 - MathJax/MathML/LaTeX 会优先提取语义公式；翻译结果会把公式渲染为带上下标的易读公式，而不是显示原始 LaTeX 代码
 - 翻译请求可附带附近正文作为本地参考上下文，只用于术语和指代消歧；真正翻译和输出的只有选中内容
 - 上下文长度会按模型大小自动裁剪：4B 模型翻译和公式朗读不参考上下文，9B/14B/更大模型会逐级保留更多上下文
+- `qwen3:14b`、QwQ、DeepSeek-R1 等推理模型会通过 Ollama `think: false` 关闭思考过程，降低翻译和朗读准备延迟
 - 选择 4B 模型时，常见公式会优先使用本地保守字面读法，例如 `D_I` 读作 `D sub I`，`\hat{B}(x)` 读作 `B hat of x`
 - 公式口语化会参考项目里的数学术语表；50+ 个核心数学符号会按语境选择更合适的读法，例如右箭头可读作“映射到、趋向于、推导出、得到、右箭头”
 - 如果朗读稿准备接口不可用，`Read` 会退回到 `/translate` 并指定翻译成 English 后再朗读
@@ -43,7 +44,7 @@ ollama pull translategemma:4b
 ollama pull qwen3:14b
 ```
 
-翻译、朗读稿准备和复杂公式口语化默认都使用 `translategemma:4b`。可在服务端通过 `OLLAMA_TRANSLATE_MODEL`、`OLLAMA_READ_MODEL`、`OLLAMA_FORMULA_MODEL` 覆盖，也可在脚本设置里切换当前翻译/朗读准备模型。如果第一次变慢，通常是 Ollama 正在加载模型。4B 模型的翻译和公式朗读不参考上下文，公式朗读也会优先采用保守字面规则；14B 模型会保留更多上下文。
+翻译、朗读稿准备和复杂公式口语化默认都使用 `translategemma:4b`。可在服务端通过 `OLLAMA_TRANSLATE_MODEL`、`OLLAMA_READ_MODEL`、`OLLAMA_FORMULA_MODEL` 覆盖，也可在脚本设置里切换当前翻译/朗读准备模型。如果第一次变慢，通常是 Ollama 正在加载模型。4B 模型的翻译和公式朗读不参考上下文，公式朗读也会优先采用保守字面规则；14B 模型会保留更多上下文。使用 `qwen3:14b`、QwQ、DeepSeek-R1 等推理模型时，服务端会自动向 Ollama 传入 `think: false`，让翻译和朗读准备直接输出结果。
 数学符号读法可在项目的 `config/math_glossary.json` 中调整，当前覆盖箭头、上下标、集合、逻辑、求和、积分、偏导等常见论文符号。
 
 ## 隐私说明
