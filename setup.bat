@@ -69,7 +69,7 @@ if errorlevel 1 (
     goto :fail
 )
 
-call conda run -n "%ENV_NAME%" python -c "import fastapi, imageio_ffmpeg, kokoro, PIL, pystray, soundfile, torch; print('[OK] Imports passed. CUDA:', torch.cuda.is_available())"
+call conda run -n "%ENV_NAME%" python -c "import fastapi, imageio_ffmpeg, kokoro, paramiko, PIL, pystray, soundfile, torch; print('[OK] Imports passed. CUDA:', torch.cuda.is_available())"
 if errorlevel 1 (
     echo [ERROR] Import verification failed.
     goto :fail

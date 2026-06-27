@@ -917,6 +917,172 @@ class ApiTests(unittest.TestCase):
                 response = self.client.post("/translate", json=payload)
                 self.assertEqual(response.status_code, 422)
 
+    def test_remote_model_reference_resolves_source_and_model(self):
+        original_sources = server.OLLAMA_SOURCES
+        server.OLLAMA_SOURCES = {
+            "local": server.OllamaSource(
+                id="local",
+                name="Local Ollama",
+                base_url="http://127.0.0.1:11434",
+                remote=False,
+            ),
+            "lab-server": server.OllamaSource(
+                id="lab-server",
+                name="Lab Server",
+                base_url="http://127.0.0.1:49152",
+                remote=True,
+            ),
+        }
+        try:
+            resolved = server._resolve_ollama_model_ref(
+                "remote:lab-server:qwen3:14b"
+            )
+        finally:
+            server.OLLAMA_SOURCES = original_sources
+
+        self.assertEqual(resolved.value, "remote:lab-server:qwen3:14b")
+        self.assertEqual(resolved.model, "qwen3:14b")
+        self.assertEqual(resolved.source.id, "lab-server")
+        self.assertEqual(resolved.source.base_url, "http://127.0.0.1:49152")
+
+    def test_plain_model_reference_uses_local_source(self):
+        resolved = server._resolve_ollama_model_ref("translategemma:4b")
+
+        self.assertEqual(resolved.value, "translategemma:4b")
+        self.assertEqual(resolved.model, "translategemma:4b")
+        self.assertEqual(resolved.source.id, "local")
+
+    def test_model_options_include_remote_source_labels(self):
+        original_sources = server.OLLAMA_SOURCES
+        server.OLLAMA_SOURCES = {
+            "local": server.OllamaSource(
+                "local",
+                "Local Ollama",
+                "http://127.0.0.1:11434",
+                False,
+            ),
+            "lab-server": server.OllamaSource(
+                "lab-server",
+                "Lab Server",
+                "http://127.0.0.1:49152",
+                True,
+            ),
+        }
+
+        def fake_ollama_json(path, timeout=5.0, base_url=None):
+            if path == "/api/tags" and base_url == "http://127.0.0.1:49152":
+                return {"models": [{"name": "qwen3:14b"}]}
+            if path == "/api/tags":
+                return {"models": [{"name": "translategemma:4b"}]}
+            raise AssertionError((path, base_url))
+
+        try:
+            with patch.object(
+                server,
+                "_call_ollama_json",
+                create=True,
+                side_effect=fake_ollama_json,
+            ):
+                options = server._collect_ollama_model_options()
+        finally:
+            server.OLLAMA_SOURCES = original_sources
+
+        self.assertEqual(
+            options,
+            [
+                {
+                    "value": "translategemma:4b",
+                    "label": "Local Ollama / translategemma:4b",
+                    "source": "local",
+                    "source_name": "Local Ollama",
+                    "model": "translategemma:4b",
+                },
+                {
+                    "value": "remote:lab-server:qwen3:14b",
+                    "label": "Lab Server / qwen3:14b",
+                    "source": "lab-server",
+                    "source_name": "Lab Server",
+                    "model": "qwen3:14b",
+                },
+            ],
+        )
+
+    def test_remote_translate_routes_generate_to_remote_base_url(self):
+        original_sources = server.OLLAMA_SOURCES
+        server.OLLAMA_SOURCES = {
+            "local": server.OllamaSource(
+                "local",
+                "Local Ollama",
+                "http://127.0.0.1:11434",
+                False,
+            ),
+            "lab-server": server.OllamaSource(
+                "lab-server",
+                "Lab Server",
+                "http://127.0.0.1:49152",
+                True,
+            ),
+        }
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeUrlopenResponse({"response": "remote result"})
+
+        try:
+            with patch.object(server.urllib_request, "urlopen", side_effect=fake_urlopen):
+                result = server._call_ollama_translate_raw(
+                    "Hello",
+                    "remote:lab-server:qwen3:14b",
+                    "Simplified Chinese",
+                    None,
+                )
+        finally:
+            server.OLLAMA_SOURCES = original_sources
+
+        self.assertEqual(result, "remote result")
+        self.assertEqual(captured["url"], "http://127.0.0.1:49152/api/generate")
+        self.assertEqual(captured["payload"]["model"], "qwen3:14b")
+
+    def test_remote_pinned_model_generation_requests_keep_alive(self):
+        original_sources = server.OLLAMA_SOURCES
+        server.OLLAMA_SOURCES = {
+            "local": server.OllamaSource(
+                "local",
+                "Local Ollama",
+                "http://127.0.0.1:11434",
+                False,
+            ),
+            "lab-server": server.OllamaSource(
+                "lab-server",
+                "Lab Server",
+                "http://127.0.0.1:49152",
+                True,
+            ),
+        }
+        server.PINNED_OLLAMA_MODELS.add("remote:lab-server:qwen3:14b")
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeUrlopenResponse({"response": "remote result"})
+
+        try:
+            with patch.object(server.urllib_request, "urlopen", side_effect=fake_urlopen):
+                server._call_ollama_translate_raw(
+                    "Hello",
+                    "remote:lab-server:qwen3:14b",
+                    "Simplified Chinese",
+                )
+        finally:
+            server.OLLAMA_SOURCES = original_sources
+
+        self.assertEqual(
+            captured["payload"]["keep_alive"],
+            server.OLLAMA_KEEP_ALIVE_PIN_VALUE,
+        )
+
     def test_translate_health_reports_model_state(self):
         def fake_ollama_json(path):
             if path == "/api/tags":
@@ -941,6 +1107,64 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(payload["model_available"])
         self.assertTrue(payload["model_running"])
         self.assertFalse(payload["model_pinned"])
+
+    def test_translate_health_reports_remote_source_metadata(self):
+        original_sources = server.OLLAMA_SOURCES
+        server.OLLAMA_SOURCES = {
+            "local": server.OllamaSource(
+                "local",
+                "Local Ollama",
+                "http://127.0.0.1:11434",
+                False,
+            ),
+            "lab-server": server.OllamaSource(
+                "lab-server",
+                "Lab Server",
+                "http://127.0.0.1:49152",
+                True,
+            ),
+        }
+
+        def fake_ollama_json(path, timeout=5.0, base_url=None):
+            if base_url == "http://127.0.0.1:49152" and path == "/api/tags":
+                return {"models": [{"name": "qwen3:14b"}]}
+            if base_url == "http://127.0.0.1:49152" and path == "/api/ps":
+                return {"models": [{"name": "qwen3:14b"}]}
+            if path == "/api/tags":
+                return {"models": [{"name": "translategemma:4b"}]}
+            if path == "/api/ps":
+                return {"models": []}
+            raise AssertionError((path, base_url))
+
+        try:
+            with patch.object(
+                server,
+                "_call_ollama_json",
+                create=True,
+                side_effect=fake_ollama_json,
+            ):
+                response = self.client.get(
+                    "/translate/health?model=remote:lab-server:qwen3:14b"
+                )
+        finally:
+            server.OLLAMA_SOURCES = original_sources
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["source"], "lab-server")
+        self.assertEqual(payload["source_name"], "Lab Server")
+        self.assertEqual(payload["model"], "remote:lab-server:qwen3:14b")
+        self.assertTrue(payload["model_running"])
+        self.assertIn(
+            {
+                "value": "remote:lab-server:qwen3:14b",
+                "label": "Lab Server / qwen3:14b",
+                "source": "lab-server",
+                "source_name": "Lab Server",
+                "model": "qwen3:14b",
+            },
+            payload["available_model_options"],
+        )
 
     def test_translate_health_reports_pinned_model(self):
         server.PINNED_OLLAMA_MODELS.add("translategemma:4b")
@@ -994,6 +1218,60 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(payload["model_pinned"])
         self.assertIn("qwen3:14b", server.PINNED_OLLAMA_MODELS)
         keepalive.assert_called_once_with("qwen3:14b", server.OLLAMA_KEEP_ALIVE_PIN_VALUE)
+
+    def test_translate_model_keepalive_checks_remote_running_state(self):
+        original_sources = server.OLLAMA_SOURCES
+        server.OLLAMA_SOURCES = {
+            "local": server.OllamaSource(
+                "local",
+                "Local Ollama",
+                "http://127.0.0.1:11434",
+                False,
+            ),
+            "lab-server": server.OllamaSource(
+                "lab-server",
+                "Lab Server",
+                "http://127.0.0.1:49152",
+                True,
+            ),
+        }
+
+        def fake_ollama_json(path, timeout=5.0, base_url=None):
+            if path == "/api/ps" and base_url == "http://127.0.0.1:49152":
+                return {"models": [{"name": "qwen3:14b"}]}
+            if path == "/api/ps":
+                return {"models": []}
+            raise AssertionError((path, base_url))
+
+        try:
+            with patch.object(
+                server,
+                "_call_ollama_model_keep_alive",
+                create=True,
+                return_value={"done_reason": "load"},
+            ) as keepalive, patch.object(
+                server,
+                "_call_ollama_json",
+                create=True,
+                side_effect=fake_ollama_json,
+            ):
+                response = self.client.post(
+                    "/translate/model/keepalive",
+                    json={"model": "remote:lab-server:qwen3:14b"},
+                )
+        finally:
+            server.OLLAMA_SOURCES = original_sources
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["model"], "remote:lab-server:qwen3:14b")
+        self.assertTrue(payload["model_running"])
+        self.assertTrue(payload["model_pinned"])
+        self.assertIn("remote:lab-server:qwen3:14b", server.PINNED_OLLAMA_MODELS)
+        keepalive.assert_called_once_with(
+            "remote:lab-server:qwen3:14b",
+            server.OLLAMA_KEEP_ALIVE_PIN_VALUE,
+        )
 
     def test_translate_model_unload_unpins_model(self):
         server.PINNED_OLLAMA_MODELS.add("qwen3:14b")

@@ -102,6 +102,12 @@ The default Ollama model is `translategemma:4b` for translation, read preparatio
 
 Use **Keep loaded** in the Translation settings when you plan to translate or read many selections with the same Ollama model. This preloads the model with `keep_alive: -1m` and keeps sending that setting for the pinned model, avoiding repeated first-token delays. Use **Unload** when you are done to release VRAM.
 
+### Remote Ollama over LAN
+
+Right-click the Kokoro TTS tray icon and choose `Remote Service`. Enter the server name, IP, SSH port, username, password, and remote Ollama host/port. The app creates a local SSH tunnel to the server's native Ollama API, then the browser model selector will show models as `Server Name / model`.
+
+The browser script never receives the SSH password. For convenience, the tray app stores the remote profile in `tray_settings.json`.
+
 Formula wording is guided by `config/math_glossary.json`. Each symbol can define a direct reading, read-aloud defaults and contextual readings, for example right arrow can mean `maps to`, `approaches`, `implies`, `gives`, or simply `right arrow`. Local rules choose common cases first. For 4B models, the formula read-aloud path deliberately prefers these literal rules and omits formula context where possible; the same glossary is included in Ollama prompts only for harder formulas.
 
 ### 4. Install the Browser Script

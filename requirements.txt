@@ -13,3 +13,4 @@ imageio-ffmpeg==0.6.0
 # Windows tray application
 pystray==0.19.5
 Pillow==12.2.0
+paramiko>=3.5,<5

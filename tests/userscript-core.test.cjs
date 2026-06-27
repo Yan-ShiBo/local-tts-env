@@ -426,3 +426,28 @@ test("bare LaTeX formulas use rules or LLM fallback", () => {
   assert.equal(complex.formulas.length, 1);
   assert.match(complex.text, /__LOCAL_READ_FORMULA_0__/);
 });
+
+test("model option merge includes remote health metadata", () => {
+  const { mergeTranslationModelOptions } = require("../tts-userscript.js");
+  const merged = mergeTranslationModelOptions(
+    [{ value: "translategemma:4b", label: "translategemma:4b - default" }],
+    {
+      available_models: ["translategemma:4b"],
+      available_model_options: [
+        {
+          value: "remote:lab-server:qwen3:14b",
+          label: "Lab Server / qwen3:14b",
+          source: "lab-server",
+          source_name: "Lab Server",
+          model: "qwen3:14b",
+        },
+      ],
+    },
+    "remote:lab-server:qwen3:14b"
+  );
+
+  assert.deepEqual(merged, [
+    { value: "translategemma:4b", label: "translategemma:4b - default" },
+    { value: "remote:lab-server:qwen3:14b", label: "Lab Server / qwen3:14b" },
+  ]);
+});
