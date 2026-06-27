@@ -756,12 +756,42 @@ def _audio_response(wav: np.ndarray, sample_rate: int, audio_format: str) -> Res
     )
 
 
+def _strip_thinking_trace(text: str) -> str:
+    value = text or ""
+
+    # 1. 标准闭合标签：<think> ... </think>
+    value = re.sub(r"(?is)<think\b[^>]*>.*?</think>", "", value)
+
+    # 2. 兼容 <thinking> ... </thinking>
+    value = re.sub(r"(?is)<thinking\b[^>]*>.*?</thinking>", "", value)
+
+    # 3. 你的这次情况：前面是思考内容，后面只有 </think>
+    #    直接保留最后一个 </think> 后面的内容。
+    if re.search(r"(?is)</think>", value):
+        value = re.split(r"(?is)</think>", value)[-1]
+
+    # 4. 未闭合 <think>：如果还残留起始标签，去掉标签后内容。
+    #    这个规则保守一些，只处理文本开头出现的情况。
+    value = re.sub(r"(?is)^\s*<think\b[^>]*>.*", "", value)
+
+    # 5. 常见自然语言 thinking 前缀
+    value = re.sub(
+        r"(?is)^\s*(thinking|reasoning)\s*:\s*.*?(answer|translation)\s*:\s*",
+        "",
+        value,
+    )
+
+    return value.strip()
+
+
 def _clean_translation_response(text: str) -> str:
-    cleaned = re.sub(r"(?is)<think>.*?</think>", "", text or "").strip()
+    cleaned = _strip_thinking_trace(text)
+
     if cleaned.startswith("```") and cleaned.endswith("```"):
         lines = cleaned.splitlines()
         if len(lines) >= 2:
             cleaned = "\n".join(lines[1:-1]).strip()
+
     return cleaned.strip().strip('"').strip()
 
 
@@ -788,15 +818,9 @@ def _model_size_billions(model: Optional[str]) -> Optional[float]:
         return None
 
 
-def _ollama_should_disable_thinking(model: Optional[str]) -> bool:
-    value = re.sub(r"[^a-z0-9]+", "", _clean_ollama_model_name(model).lower())
-    if not value or "embedding" in value:
-        return False
-    return any(marker in value for marker in ("qwen3", "qwq", "deepseekr1"))
-
-
 def _apply_ollama_thinking_mode(payload: dict, model: Optional[str]) -> None:
-    if _ollama_should_disable_thinking(model):
+    value = re.sub(r"[^a-z0-9]+", "", _clean_ollama_model_name(model).lower())
+    if value and "embedding" not in value:
         payload["think"] = False
 
 
@@ -1668,7 +1692,8 @@ def _call_ollama_translate_raw(
             "Keep all names, numbers, and punctuation. "
             "CRITICAL: Do NOT translate, modify, omit, or change the capitalization of the placeholders (e.g. __MATH_0__). Keep them exactly as they are. "
             "Keep placeholders in the same relative positions; the server will restore them as formulas for the browser renderer, so do not create extra LaTeX yourself. "
-            "Return only the translated text, with no reasoning, notes, markdown fences, or explanations."
+            "Return only the translated text, with no reasoning, notes, markdown fences, or explanations. "
+            "Do not output <think>, </think>, reasoning, analysis, or hidden-chain text. Output exactly one final translation string."
         ),
         "prompt": prompt,
         "options": {
@@ -1677,6 +1702,7 @@ def _call_ollama_translate_raw(
         },
     }
     _prepare_ollama_generate_payload(payload, ref.value)
+    print("[OLLAMA TRANSLATE PAYLOAD]", json.dumps(payload, ensure_ascii=False))
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib_request.Request(
         _ollama_generate_url(ref),
