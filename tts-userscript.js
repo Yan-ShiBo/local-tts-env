@@ -110,6 +110,44 @@ const KokoroTTSCore = (() => {
     return supportsWebMOpus(mediaSourceApi) ? "stream" : "ogg";
   }
 
+  function mergeTranslationModelOptions(baseOptions, payload, selectedValue) {
+    const merged = [];
+    const seen = new Set();
+
+    function add(value, label) {
+      const cleanValue = String(value || "").trim();
+      if (!cleanValue || seen.has(cleanValue)) return;
+      seen.add(cleanValue);
+      merged.push({ value: cleanValue, label: String(label || cleanValue) });
+    }
+
+    for (const option of Array.isArray(baseOptions) ? baseOptions : []) {
+      add(option.value, option.label);
+    }
+
+    const remoteOptions =
+      payload && Array.isArray(payload.available_model_options)
+        ? payload.available_model_options
+        : [];
+    for (const option of remoteOptions) {
+      add(option.value, option.label);
+    }
+
+    const installedModels =
+      payload && Array.isArray(payload.available_models)
+        ? payload.available_models
+        : [];
+    for (const model of installedModels) {
+      add(model, `Installed: ${model}`);
+    }
+
+    if (selectedValue) {
+      add(selectedValue, `Custom: ${selectedValue}`);
+    }
+
+    return merged;
+  }
+
   function formatPlaybackProgress({ currentTime = 0, duration = 0, streamEnded = false } = {}) {
     const seconds = Math.max(0, Math.floor(Number(currentTime) || 0));
     if (!streamEnded || !Number.isFinite(duration) || duration <= 0) {
@@ -804,6 +842,7 @@ const KokoroTTSCore = (() => {
     formulaToReadableHtml,
     isUnsupportedMediaError,
     latexToReadableFormula,
+    mergeTranslationModelOptions,
     normalizeAudioBuffer,
     normalizeAudioBlob,
     normalizeCopyTextWithLatex,
@@ -1742,15 +1781,22 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
     });
   }
 
-  function syncInstalledTranslationModels(models) {
+  function syncInstalledTranslationModels(payloadOrModels) {
     const select = document.getElementById("tts-translate-model-select");
-    if (!select || !Array.isArray(models)) return;
-    for (const model of models) {
-      if (typeof model !== "string" || !model.trim()) continue;
-      if (Array.from(select.options).some((option) => option.value === model)) {
-        continue;
-      }
-      select.appendChild(new Option(`Installed: ${model}`, model));
+    if (!select) return;
+    const payload = Array.isArray(payloadOrModels)
+      ? { available_models: payloadOrModels }
+      : payloadOrModels || {};
+    const options = KokoroTTSCore.mergeTranslationModelOptions(
+      TRANSLATION_MODELS,
+      payload,
+      settings.translateModel
+    );
+    select.textContent = "";
+    for (const option of options) {
+      const item = new Option(option.label, option.value);
+      item.selected = option.value === settings.translateModel;
+      select.appendChild(item);
     }
     select.value = settings.translateModel;
   }
@@ -1853,7 +1899,7 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
           text.textContent = "Ollama offline";
           text.style.color = "#e57373";
         } else if (payload.model_running) {
-          syncInstalledTranslationModels(payload.available_models);
+          syncInstalledTranslationModels(payload);
           updateTranslationModelControls(payload);
           dot.className = "tts-status-dot online";
           text.textContent = payload.model_pinned
@@ -1861,13 +1907,13 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
             : `${payload.model} running`;
           text.style.color = "#81c784";
         } else if (payload.model_available) {
-          syncInstalledTranslationModels(payload.available_models);
+          syncInstalledTranslationModels(payload);
           updateTranslationModelControls(payload);
           dot.className = "tts-status-dot warning";
           text.textContent = `${payload.model} installed, not loaded`;
           text.style.color = "#f0c040";
         } else {
-          syncInstalledTranslationModels(payload.available_models);
+          syncInstalledTranslationModels(payload);
           updateTranslationModelControls(payload);
           dot.className = "tts-status-dot offline";
           text.textContent = `${payload.model} not installed`;
