@@ -118,6 +118,11 @@ assert server.torch is None
 
         self.assertEqual(cleaned, "你好，世界")
 
+    def test_translation_cleanup_removes_orphan_closing_think(self):
+        raw = "Okay, let me tackle this.\n</think>\n\n划词朗读"
+        self.assertEqual(server._clean_translation_response(raw), "划词朗读")
+
+
     def test_ollama_thinking_mode_disabled_for_qwen3_generation(self):
         payload = {}
 
@@ -132,12 +137,12 @@ assert server.torch is None
 
         self.assertIs(payload["think"], False)
 
-    def test_ollama_thinking_mode_unchanged_for_non_reasoning_models(self):
+    def test_ollama_thinking_mode_disabled_for_non_reasoning_models(self):
         payload = {}
 
         server._apply_ollama_thinking_mode(payload, "translategemma:4b")
 
-        self.assertNotIn("think", payload)
+        self.assertIs(payload["think"], False)
 
     def test_ollama_thinking_mode_unchanged_for_embedding_models(self):
         payload = {}
@@ -527,6 +532,33 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(result, "只翻译选中内容")
         self.assertIs(captured["payload"]["think"], False)
         self.assertEqual(captured["payload"]["keep_alive"], server.OLLAMA_KEEP_ALIVE_PIN_VALUE)
+
+    def test_remote_qwen3_30b_translate_disables_thinking(self):
+        captured = {}
+        original_sources = server.OLLAMA_SOURCES.copy()
+        server.OLLAMA_SOURCES["lab-server"] = server.OllamaSource("lab-server", "Lab Server", "http://fake")
+
+        def fake_urlopen(request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeUrlopenResponse({"response": "划词朗读"})
+
+        try:
+            with patch.object(server.urllib_request, "urlopen", side_effect=fake_urlopen):
+                result = server._call_ollama_translate_raw(
+                    "Selection read-aloud",
+                    "remote:lab-server:qwen3:30b",
+                    "Simplified Chinese",
+                    None,
+                )
+
+            self.assertEqual(result, "划词朗读")
+            self.assertIs(captured["payload"]["think"], False)
+            self.assertEqual(captured["payload"]["model"], "qwen3:30b")
+        finally:
+            server.OLLAMA_SOURCES.clear()
+            server.OLLAMA_SOURCES.update(original_sources)
+
+
 
     def test_translate_hides_ollama_errors(self):
         with patch.object(
